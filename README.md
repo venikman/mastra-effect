@@ -49,9 +49,19 @@ npm run demo:debate
 
 Run the interactive Studio UI and REST API so you can chat with the repo QA agent in the browser and call it via HTTP.
 
+### With Real LLM (requires API key)
+
 ```bash
 npm run dev
 ```
+
+### With Mock LLM (no API key needed)
+
+```bash
+npm run dev:studio
+```
+
+This starts a mock OpenAI-compatible server alongside Mastra Studio - perfect for UI development and testing without API costs.
 
 Then open:
 

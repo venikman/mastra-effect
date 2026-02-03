@@ -12,9 +12,23 @@ This folder provides a mock LLM client for local development when real AI API ca
 
 ## Quick Start
 
-### Option 1: Run Mock Server (recommended)
+### Option 1: Mastra Studio with Mock (recommended for UI development)
 
-Start the mock Mastra server - use it exactly like the real server:
+Run Mastra Studio/Playground with a mock LLM backend - full UI experience without API calls:
+
+```bash
+npm run dev:studio
+```
+
+This starts:
+- Mock OpenAI-compatible server on port 4222
+- Mastra Studio on http://localhost:4111
+
+Open http://localhost:4111 in your browser to use the Playground UI with mock responses!
+
+### Option 2: Run Mock API Server
+
+Start the mock Mastra API server - use it exactly like the real server:
 
 ```bash
 # Terminal 1: Start the mock server (runs on http://localhost:4111)

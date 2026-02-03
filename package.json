@@ -1,0 +1,28 @@
+{
+  "name": "mastra-effect-mini-lab",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "mastra dev",
+    "dev:mock": "tsx mock/standalone-server.ts",
+    "demo:qa": "tsx demos/demo1_repo_qa.ts",
+    "demo:debate": "tsx demos/demo2_debate.ts",
+    "demo:mock": "tsx mock/example-usage.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mastra/client-js": "^1.1.0",
+    "@mastra/core": "^1.1.0",
+    "dotenv": "^17.2.3",
+    "effect": "^3.18.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.7",
+    "mastra": "^1.1.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
+  }
+}

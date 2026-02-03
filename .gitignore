@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+output
+.DS_Store
+coverage
+.mastra/.build
+

@@ -197,7 +197,7 @@ For more specific information, please ask about:
  * (listFiles → searchText → readFile → answer).
  *
  * @param label  Label prefix for final text responses (e.g. "mock:smart").
- *               If provided, the answer is `(label)\n\n...`. If not, uses generateSmartAnswer.
+ *               If provided, prefixes the smart answer with `(label)\n\n`.
  */
 export const createSmartMockClient = (opts?: {
   label?: string;
@@ -233,11 +233,7 @@ export const createSmartMockClient = (opts?: {
           if (state.toolsCalledCount >= 2) {
             conversationStates.delete(convKey);
             return buildTextResponse(
-              opts?.label
-                ? makeAnswer(
-                    `I used tools and now I can answer:\n\n${userContent}`,
-                  )
-                : generateSmartAnswer(userContent),
+              makeAnswer(generateSmartAnswer(userContent)),
             );
           }
 
@@ -246,9 +242,7 @@ export const createSmartMockClient = (opts?: {
 
           conversationStates.delete(convKey);
           return buildTextResponse(
-            opts?.label
-              ? makeAnswer(`No more tools to call.\n\n${userContent}`)
-              : generateSmartAnswer(userContent),
+            makeAnswer(generateSmartAnswer(userContent)),
           );
         }
 
@@ -262,11 +256,7 @@ export const createSmartMockClient = (opts?: {
         }
 
         conversationStates.delete(convKey);
-        return buildTextResponse(
-          opts?.label
-            ? makeAnswer(userContent)
-            : generateSmartAnswer(userContent),
-        );
+        return buildTextResponse(makeAnswer(generateSmartAnswer(userContent)));
       }),
   };
 };

@@ -51,4 +51,51 @@ describe("tools", () => {
     expect(out.truncated).toBe(true);
     expect(out.content).toBe("0123456789");
   });
+
+  it("blocks symlink traversal in listFiles and denies readFile escapes via symlink", async () => {
+    const root = await makeTempDir();
+    const outside = await makeTempDir();
+
+    await Fs.writeFile(Path.join(root, "inside.txt"), "inside\n", "utf8");
+    await Fs.writeFile(Path.join(outside, "outside.txt"), "outside\n", "utf8");
+
+    try {
+      // A symlinked directory inside root that points outside.
+      await Fs.symlink(outside, Path.join(root, "escape"), "dir");
+      // A symlinked file inside root that points outside.
+      await Fs.symlink(
+        Path.join(outside, "outside.txt"),
+        Path.join(root, "leak.txt"),
+        "file",
+      );
+    } catch {
+      // Some environments disallow symlinks (e.g. Windows without privileges).
+      return;
+    }
+
+    const tools = await Effect.runPromise(
+      makeRepoTools(root).pipe(Effect.provide([EventLogSilent] as const)),
+    );
+
+    const listed = await tools.listFiles.execute!(
+      { max: 500 } as any,
+      undefined as any,
+    );
+    const files = (listed as any).files as string[];
+
+    expect(files).toContain("inside.txt");
+    expect(files).not.toContain("leak.txt");
+    expect(files.some((p) => p.startsWith("escape/"))).toBe(false);
+
+    await expect(
+      tools.readFile.execute!({ path: "leak.txt" } as any, undefined as any),
+    ).rejects.toMatchObject({ _tag: "ToolDeniedError" });
+
+    await expect(
+      tools.readFile.execute!(
+        { path: "escape/outside.txt" } as any,
+        undefined as any,
+      ),
+    ).rejects.toMatchObject({ _tag: "ToolDeniedError" });
+  });
 });

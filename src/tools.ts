@@ -160,6 +160,60 @@ const safeReadTextFile = (
       }),
   });
 
+const isErrnoException = (cause: unknown): cause is NodeJS.ErrnoException =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "code" in cause &&
+  typeof (cause as any).code === "string";
+
+const ensureRealpathInsideRoot = (
+  tool: string,
+  rootAbs: string,
+  absPath: string,
+  userPath: string,
+): Effect.Effect<void, ToolDeniedError | ToolFsError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const rootReal = await Fs.realpath(rootAbs);
+
+      let targetReal: string | null = null;
+      try {
+        targetReal = await Fs.realpath(absPath);
+      } catch (cause) {
+        // Let the actual file read report ENOENT for nicer error messages.
+        if (isErrnoException(cause) && cause.code === "ENOENT") return;
+        throw cause;
+      }
+
+      if (!targetReal) return;
+
+      const rel = Path.relative(rootReal, targetReal);
+      const escaped =
+        rel === "" || rel === "."
+          ? false
+          : rel.startsWith("..") ||
+            rel.split(Path.sep).includes("..") ||
+            Path.isAbsolute(rel);
+
+      if (escaped) {
+        throw new ToolDeniedError({
+          tool,
+          path: userPath,
+          reason: "Path resolves outside target root",
+        });
+      }
+    },
+    catch: (cause) => {
+      if (cause instanceof ToolDeniedError) return cause;
+      return new ToolFsError({
+        tool,
+        message:
+          cause instanceof Error ? cause.message : "Failed to resolve path",
+        cause,
+      });
+    },
+  });
+
 /** List files using fast-glob, filtering through the deny list. */
 const listFilesEffect = (rootAbs: string, maxFiles: number) =>
   Effect.tryPromise({
@@ -168,13 +222,26 @@ const listFilesEffect = (rootAbs: string, maxFiles: number) =>
         cwd: rootAbs,
         dot: true,
         onlyFiles: true,
+        followSymbolicLinks: false,
         ignore: ["**/node_modules/**", "**/.git/**", "**/output/**"],
       });
-      const filtered = all
-        .filter((rel) => !isDeniedRelPath(rel).denied)
-        .sort()
-        .slice(0, maxFiles);
-      return { root: rootAbs, files: filtered };
+
+      const candidates = all.filter((rel) => !isDeniedRelPath(rel).denied);
+      const nonSymlinks = (
+        await Promise.all(
+          candidates.map(async (rel) => {
+            try {
+              const st = await Fs.lstat(Path.join(rootAbs, rel));
+              return st.isSymbolicLink() ? null : rel;
+            } catch {
+              return null;
+            }
+          }),
+        )
+      ).filter((rel): rel is string => typeof rel === "string");
+
+      const files = nonSymlinks.sort().slice(0, maxFiles);
+      return { root: rootAbs, files };
     },
     catch: (cause) =>
       new ToolFsError({
@@ -188,6 +255,12 @@ const listFilesEffect = (rootAbs: string, maxFiles: number) =>
 const readFileEffect = (rootAbs: string, relPath: string, maxBytes: number) =>
   Effect.gen(function* () {
     const resolved = yield* resolveInsideRoot("readFile", rootAbs, relPath);
+    yield* ensureRealpathInsideRoot(
+      "readFile",
+      rootAbs,
+      resolved.abs,
+      resolved.rel,
+    );
     const file = yield* safeReadTextFile("readFile", resolved.abs, maxBytes);
     return {
       root: rootAbs,

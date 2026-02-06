@@ -29,14 +29,22 @@ describe("mock/shared response builders", () => {
 });
 
 describe("mock/shared selectNextTool", () => {
-  const makeBody = (calledToolNames: string[]): OpenRouterChatCompletionRequest => ({
+  const makeBody = (
+    calledToolNames: string[],
+  ): OpenRouterChatCompletionRequest => ({
     model: "m",
     messages: [
       { role: "user", content: "q" },
       ...calledToolNames.map((name) => ({
         role: "assistant" as const,
         content: null,
-        tool_calls: [{ id: "x", type: "function" as const, function: { name, arguments: "{}" } }],
+        tool_calls: [
+          {
+            id: "x",
+            type: "function" as const,
+            function: { name, arguments: "{}" },
+          },
+        ],
       })),
     ],
     stream: false,
@@ -48,12 +56,18 @@ describe("mock/shared selectNextTool", () => {
   });
 
   it("selects readFile after searchText", () => {
-    const tool = selectNextTool(makeBody(["searchText"]), ["searchText", "readFile"]);
+    const tool = selectNextTool(makeBody(["searchText"]), [
+      "searchText",
+      "readFile",
+    ]);
     expect(tool?.name).toBe("readFile");
   });
 
   it("returns null when all tools called", () => {
-    const tool = selectNextTool(makeBody(["searchText", "readFile"]), ["searchText", "readFile"]);
+    const tool = selectNextTool(makeBody(["searchText", "readFile"]), [
+      "searchText",
+      "readFile",
+    ]);
     expect(tool).toBeNull();
   });
 });
@@ -84,12 +98,16 @@ describe("mock/shared createSmartMockClient", () => {
     const req: OpenRouterChatCompletionRequest = {
       model: "m",
       messages: [{ role: "user", content: "hello" }],
-      tools: [{ type: "function", function: { name: "listFiles", parameters: {} } }],
+      tools: [
+        { type: "function", function: { name: "listFiles", parameters: {} } },
+      ],
       stream: false,
     };
 
     const res = await Effect.runPromise(client.chatCompletions(req));
-    expect(res.body.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("listFiles");
+    expect(res.body.choices[0]?.message.tool_calls?.[0]?.function.name).toBe(
+      "listFiles",
+    );
   });
 
   it("returns text when no tools available", async () => {
@@ -114,5 +132,7 @@ describe("mock/shared createSmartMockClient", () => {
 
     const res = await Effect.runPromise(client.chatCompletions(req));
     expect(res.body.choices[0]?.message.content).toContain("(test:label)");
+    // Label should be a prefix only; we still want the "smart" mock answer.
+    expect(res.body.choices[0]?.message.content).toContain("Mock Response");
   });
 });

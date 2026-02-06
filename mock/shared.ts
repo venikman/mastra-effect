@@ -4,6 +4,7 @@
  * Provides: response builders, smart answer generation, tool selection,
  * and a stateful smart mock client that sequences tool calls.
  */
+import pino from "pino";
 import { Effect } from "effect";
 import type {
   OpenRouterChatCompletionRequest,
@@ -19,6 +20,12 @@ export type MockToolCall = {
   arguments: Record<string, unknown>;
 };
 
+export const mockLogger = pino({
+  name: "mock",
+  level: (process.env.LOG_LEVEL ?? "info").toLowerCase(),
+  transport: { target: "pino/file", options: { destination: 1 } },
+});
+
 type MockOpenRouterResponse = {
   body: OpenRouterChatCompletionResponse;
   headers: Record<string, string>;
@@ -29,28 +36,41 @@ type MockOpenRouterResponse = {
 export const buildTextResponse = (content: string): MockOpenRouterResponse => ({
   body: {
     id: `mock-${Date.now()}`,
-    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+      },
+    ],
     usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
   },
   headers: { "x-mock": "true" },
 });
 
-export const buildToolCallResponse = (toolCalls: MockToolCall[]): MockOpenRouterResponse => ({
+export const buildToolCallResponse = (
+  toolCalls: MockToolCall[],
+): MockOpenRouterResponse => ({
   body: {
     id: `mock-${Date.now()}`,
-    choices: [{
-      index: 0,
-      message: {
-        role: "assistant",
-        content: null,
-        tool_calls: toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function" as const,
-          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-        })),
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.arguments),
+            },
+          })),
+        },
+        finish_reason: "tool_calls",
       },
-      finish_reason: "tool_calls",
-    }],
+    ],
     usage: { prompt_tokens: 50, completion_tokens: 10, total_tokens: 60 },
   },
   headers: { "x-mock": "true" },
@@ -70,20 +90,43 @@ export const selectNextTool = (
   }
 
   if (!calledTools.has("searchText") && availableTools.includes("searchText"))
-    return { id: `tc${Date.now()}`, name: "searchText", arguments: { query: "export", maxMatches: 10 } };
+    return {
+      id: `tc${Date.now()}`,
+      name: "searchText",
+      arguments: { query: "export", maxMatches: 10 },
+    };
 
   if (!calledTools.has("readFile") && availableTools.includes("readFile"))
-    return { id: `tc${Date.now()}`, name: "readFile", arguments: { path: "package.json" } };
+    return {
+      id: `tc${Date.now()}`,
+      name: "readFile",
+      arguments: { path: "package.json" },
+    };
 
   return null;
 };
 
 // ─── Smart Answer Generation ─────────────────────────────────────────────────
 
+/** Extract a reasonable search term from a user query. */
+export const extractSearchTerms = (query: string): string => {
+  const lower = query.toLowerCase();
+  if (lower.includes("run") || lower.includes("start")) return "npm run";
+  if (lower.includes("test")) return "test";
+  if (lower.includes("config")) return "config";
+  if (lower.includes("export")) return "export";
+  return "function";
+};
+
 export const generateSmartAnswer = (userQuery: string): string => {
   const query = userQuery.toLowerCase();
 
-  if (query.includes("run") || query.includes("start") || query.includes("test")) {
+  if (
+    query.includes("run") ||
+    query.includes("start") ||
+    query.includes("test") ||
+    query.includes("how")
+  ) {
     return `## How to Run This Project (Mock Response)
 
 Based on my analysis of the repository:
@@ -109,7 +152,11 @@ npm test         # Run tests
 *Note: This is a mock response for local development without API calls.*`;
   }
 
-  if (query.includes("structure") || query.includes("architecture") || query.includes("files")) {
+  if (
+    query.includes("structure") ||
+    query.includes("architecture") ||
+    query.includes("files")
+  ) {
     return `## Repository Structure (Mock Response)
 
 \`\`\`
@@ -152,7 +199,9 @@ For more specific information, please ask about:
  * @param label  Label prefix for final text responses (e.g. "mock:smart").
  *               If provided, the answer is `(label)\n\n...`. If not, uses generateSmartAnswer.
  */
-export const createSmartMockClient = (opts?: { label?: string }): OpenRouterClientType => {
+export const createSmartMockClient = (opts?: {
+  label?: string;
+}): OpenRouterClientType => {
   const conversationStates = new Map<string, { toolsCalledCount: number }>();
 
   return {
@@ -168,7 +217,9 @@ export const createSmartMockClient = (opts?: { label?: string }): OpenRouterClie
         }
         const state = conversationStates.get(convKey)!;
 
-        const lastUserMsg = [...body.messages].reverse().find((m) => m.role === "user");
+        const lastUserMsg = [...body.messages]
+          .reverse()
+          .find((m) => m.role === "user");
         const userContent = lastUserMsg?.content ?? "";
         const hasToolResults = body.messages.some((m) => m.role === "tool");
         const availableTools = body.tools?.map((t) => t.function.name) ?? [];
@@ -183,7 +234,9 @@ export const createSmartMockClient = (opts?: { label?: string }): OpenRouterClie
             conversationStates.delete(convKey);
             return buildTextResponse(
               opts?.label
-                ? makeAnswer(`I used tools and now I can answer:\n\n${userContent}`)
+                ? makeAnswer(
+                    `I used tools and now I can answer:\n\n${userContent}`,
+                  )
                 : generateSmartAnswer(userContent),
             );
           }
@@ -199,8 +252,13 @@ export const createSmartMockClient = (opts?: { label?: string }): OpenRouterClie
           );
         }
 
-        if (state.toolsCalledCount === 0 && availableTools.includes("listFiles")) {
-          return buildToolCallResponse([{ id: "tc1", name: "listFiles", arguments: { max: 50 } }]);
+        if (
+          state.toolsCalledCount === 0 &&
+          availableTools.includes("listFiles")
+        ) {
+          return buildToolCallResponse([
+            { id: "tc1", name: "listFiles", arguments: { max: 50 } },
+          ]);
         }
 
         conversationStates.delete(convKey);

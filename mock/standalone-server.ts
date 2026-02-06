@@ -20,7 +20,9 @@ import {
 } from "../src/mastra.js";
 import { OpenRouterClient } from "../src/openrouter.js";
 import { EventLogLive, makeRepoTools } from "../src/tools.js";
-import { createSmartMockClient } from "./shared.js";
+import { createSmartMockClient, mockLogger } from "./shared.js";
+
+const log = mockLogger.child({ server: "mastra" });
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -107,9 +109,7 @@ const startServer = async () => {
     const prompt =
       typeof messages === "string" ? messages : JSON.stringify(messages);
 
-    console.log(
-      `[Server] Generating for agent '${agentId}': "${prompt.slice(0, 50)}..."`,
-    );
+    log.info({ agentId, prompt: prompt.slice(0, 80) }, "generate");
 
     const result = await agent.generateLegacy(prompt);
     return c.json({
@@ -125,19 +125,14 @@ const startServer = async () => {
   app.post("/api/agents/:agentId/generate", generate);
 
   serve({ fetch: app.fetch, port: PORT }, () => {
-    console.log(`
-Mock Mastra Server running at http://localhost:${PORT}
-Scenario: ${MOCK_SCENARIO} | Target: ${TARGET_DIR}
-
-  GET  /                              Health check
-  GET  /agents                        List agents
-  GET  /agents/repoQa                 Agent details
-  POST /agents/repoQa/generate-legacy Generate response
-`);
+    log.info(
+      { port: PORT, scenario: MOCK_SCENARIO, target: TARGET_DIR },
+      "server started",
+    );
   });
 };
 
 startServer().catch((e) => {
-  console.error("Failed to start server:", e);
+  log.fatal({ err: e }, "Failed to start server");
   process.exit(1);
 });

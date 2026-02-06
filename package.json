@@ -19,7 +19,8 @@
     "effect": "^3.18.4",
     "envalid": "^8.1.1",
     "fast-glob": "^3.3.3",
-    "hono": "^4.11.7"
+    "hono": "^4.11.7",
+    "pino": "^10.3.0"
   },
   "devDependencies": {
     "@rstest/core": "^0.3.3",

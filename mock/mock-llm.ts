@@ -5,6 +5,7 @@
  * when OpenRouter/Grok API calls are not possible or desired.
  */
 import { Effect, Layer } from "effect";
+import { mockLogger } from "./shared.js";
 import { AppConfig, type AppConfig as AppConfigType } from "../src/config.js";
 import {
   OpenRouterClient,
@@ -188,8 +189,13 @@ export const createMockClient = (
         // Build OpenRouter-compatible response
         const response = buildResponse(resolved, callIndex);
 
-        console.log(
-          `[MockLLM] Call #${callIndex} (${scenario.name}): ${resolved.type === "text" ? "text" : "tool_calls"}`,
+        mockLogger.debug(
+          {
+            call: callIndex,
+            scenario: scenario.name,
+            type: resolved.type === "text" ? "text" : "tool_calls",
+          },
+          "mock-llm call",
         );
 
         return {

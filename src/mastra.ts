@@ -42,38 +42,55 @@ const isTextPart = (part: unknown): part is { type: "text"; text: string } =>
 
 const isToolCallPart = (
   part: unknown,
-): part is { type: "tool-call"; toolCallId: string; toolName: string; args: unknown } =>
+): part is {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+} =>
   typeof part === "object" &&
   part !== null &&
   (part as any).type === "tool-call" &&
   typeof (part as any).toolCallId === "string" &&
   typeof (part as any).toolName === "string";
 
-const promptToOpenAiMessages = (prompt: LanguageModelV1CallOptions["prompt"]): OpenAIChatMessage[] => {
+const promptToOpenAiMessages = (
+  prompt: LanguageModelV1CallOptions["prompt"],
+): OpenAIChatMessage[] => {
   const out: OpenAIChatMessage[] = [];
 
   for (const msg of prompt) {
     if (msg.role === "system" || msg.role === "user") {
-      const parts = typeof msg.content === "string" ? [{ type: "text", text: msg.content }] : msg.content;
-      const content = parts.filter(isTextPart).map((p) => p.text).join("");
+      const parts =
+        typeof msg.content === "string"
+          ? [{ type: "text", text: msg.content }]
+          : msg.content;
+      const content = parts
+        .filter(isTextPart)
+        .map((p) => p.text)
+        .join("");
       out.push({ role: msg.role, content });
       continue;
     }
 
     if (msg.role === "assistant") {
-      const parts = typeof msg.content === "string" ? [{ type: "text", text: msg.content }] : msg.content;
-      const content = parts.filter(isTextPart).map((p) => p.text).join("");
+      const parts =
+        typeof msg.content === "string"
+          ? [{ type: "text", text: msg.content }]
+          : msg.content;
+      const content = parts
+        .filter(isTextPart)
+        .map((p) => p.text)
+        .join("");
 
-      const toolCalls = parts
-        .filter(isToolCallPart)
-        .map((p) => ({
-          id: p.toolCallId,
-          type: "function" as const,
-          function: {
-            name: p.toolName,
-            arguments: JSON.stringify(p.args ?? {}),
-          },
-        }));
+      const toolCalls = parts.filter(isToolCallPart).map((p) => ({
+        id: p.toolCallId,
+        type: "function" as const,
+        function: {
+          name: p.toolName,
+          arguments: JSON.stringify(p.args ?? {}),
+        },
+      }));
 
       out.push({
         role: "assistant",
@@ -99,9 +116,7 @@ const promptToOpenAiMessages = (prompt: LanguageModelV1CallOptions["prompt"]): O
   return out;
 };
 
-const toolsToOpenAiTools = (
-  tools: unknown,
-): OpenAIChatTool[] => {
+const toolsToOpenAiTools = (tools: unknown): OpenAIChatTool[] => {
   if (!Array.isArray(tools)) return [];
   return tools
     .filter((t: any) => t?.type === "function")
@@ -117,7 +132,9 @@ const toolsToOpenAiTools = (
     );
 };
 
-const toolChoiceToOpenAiToolChoice = (choice: any): OpenAIChatToolChoice | undefined => {
+const toolChoiceToOpenAiToolChoice = (
+  choice: any,
+): OpenAIChatToolChoice | undefined => {
   if (!choice) return undefined;
   switch (choice.type) {
     case "auto":
@@ -158,7 +175,9 @@ const mapFinishReason = (finish: string | null | undefined): FinishReason => {
 const getFirstChoice = (resp: OpenRouterChatCompletionResponse) => {
   const choice = resp.choices?.[0];
   if (!choice) {
-    throw new ModelAdapterError({ message: "OpenRouter response has no choices" });
+    throw new ModelAdapterError({
+      message: "OpenRouter response has no choices",
+    });
   }
   return choice;
 };
@@ -167,19 +186,30 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
   const cfg = yield* AppConfig;
   const client = yield* OpenRouterClient;
 
-  const doGenerate: LanguageModelV1["doGenerate"] = async (options: LanguageModelV1CallOptions) => {
+  const doGenerate: LanguageModelV1["doGenerate"] = async (
+    options: LanguageModelV1CallOptions,
+  ) => {
     const messages = promptToOpenAiMessages(options.prompt);
 
     const requestBody: OpenRouterChatCompletionRequest = {
       model: cfg.grokModel,
       messages,
       stream: false,
-      ...(typeof options.maxTokens === "number" ? { max_tokens: options.maxTokens } : {}),
-      ...(typeof options.temperature === "number" ? { temperature: options.temperature } : {}),
+      ...(typeof options.maxTokens === "number"
+        ? { max_tokens: options.maxTokens }
+        : {}),
+      ...(typeof options.temperature === "number"
+        ? { temperature: options.temperature }
+        : {}),
       ...(typeof options.topP === "number" ? { top_p: options.topP } : {}),
-      ...(typeof options.presencePenalty === "number" ? { presence_penalty: options.presencePenalty } : {}),
-      ...(typeof options.frequencyPenalty === "number" ? { frequency_penalty: options.frequencyPenalty } : {}),
-      ...(Array.isArray(options.stopSequences) && options.stopSequences.length > 0
+      ...(typeof options.presencePenalty === "number"
+        ? { presence_penalty: options.presencePenalty }
+        : {}),
+      ...(typeof options.frequencyPenalty === "number"
+        ? { frequency_penalty: options.frequencyPenalty }
+        : {}),
+      ...(Array.isArray(options.stopSequences) &&
+      options.stopSequences.length > 0
         ? { stop: options.stopSequences }
         : {}),
       ...(typeof options.seed === "number" ? { seed: options.seed } : {}),
@@ -197,7 +227,9 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
       }
     }
 
-    const { body: resp, headers } = await runOrThrow(client.chatCompletions(requestBody));
+    const { body: resp, headers } = await runOrThrow(
+      client.chatCompletions(requestBody),
+    );
     const choice = getFirstChoice(resp);
 
     const toolCalls =
@@ -220,7 +252,9 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
         rawPrompt: requestBody,
         rawSettings: {
           model: cfg.grokModel,
-          ...(typeof options.maxTokens === "number" ? { maxTokens: options.maxTokens } : {}),
+          ...(typeof options.maxTokens === "number"
+            ? { maxTokens: options.maxTokens }
+            : {}),
         },
       },
       rawResponse: {
@@ -234,12 +268,16 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
         modelId: cfg.grokModel,
         ...(resp.id ? { id: resp.id } : {}),
       },
-      ...(choice.message.content !== null ? { text: choice.message.content } : {}),
+      ...(choice.message.content !== null
+        ? { text: choice.message.content }
+        : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   };
 
-  const doStream: LanguageModelV1["doStream"] = async (options: LanguageModelV1CallOptions) => {
+  const doStream: LanguageModelV1["doStream"] = async (
+    options: LanguageModelV1CallOptions,
+  ) => {
     const startedAt = Date.now();
     try {
       const generated = await doGenerate(options);
@@ -247,7 +285,10 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
       const stream = new ReadableStream<LanguageModelV1StreamPart>({
         start(controller) {
           if (typeof generated.text === "string") {
-            controller.enqueue({ type: "text-delta", textDelta: generated.text });
+            controller.enqueue({
+              type: "text-delta",
+              textDelta: generated.text,
+            });
           }
 
           if (generated.toolCalls) {
@@ -316,8 +357,8 @@ export const makeRepoQaAgent = (opts: {
   tools: ToolsInput;
 }) =>
   new Agent({
-    id: "repo-qa",
-    name: "repo-qa",
+    id: "repoQa",
+    name: "repoQa",
     instructions:
       "You answer questions about a local directory by calling tools. Cite evidence by naming files and line numbers where possible. Never claim you read a file unless you used readFile. Prefer using searchText to locate relevant spots before readFile.",
     model: opts.model,

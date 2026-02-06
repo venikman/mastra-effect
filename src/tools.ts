@@ -2,8 +2,31 @@ import { createHash } from "node:crypto";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import { Cause, Context, Data, Effect, Layer, Option } from "effect";
-import { z } from "zod";
-import { createTool } from "@mastra/core/tools";
+
+// NOTE: We intentionally avoid Zod in this repo code. Mastra tools are represented
+// as plain "function tool" objects with JSON-Schema-like `parameters`, and we do
+// lightweight runtime validation/coercion inside `execute`.
+
+export type JsonSchema = {
+  type: "object";
+  properties?: Record<string, unknown>;
+  required?: string[];
+  additionalProperties?: boolean;
+};
+
+export type FunctionTool = {
+  type: "function";
+  name: string;
+  description: string;
+  parameters: JsonSchema;
+  // Mastra passes a context as the second arg; we ignore it in this repo.
+  execute: (input: unknown, _context?: unknown) => Promise<unknown>;
+};
+
+const makeTool = (tool: Omit<FunctionTool, "type">): FunctionTool => ({
+  type: "function",
+  ...tool,
+});
 
 export type ToolEvent =
   | {
@@ -54,6 +77,12 @@ export class ToolFsError extends Data.TaggedError("ToolFsError")<{
   cause?: unknown;
 }> {}
 
+export class ToolInputError extends Data.TaggedError("ToolInputError")<{
+  tool: string;
+  message: string;
+  input: unknown;
+}> {}
+
 const DEFAULT_MAX_FILES = 400;
 const DEFAULT_MAX_FILE_BYTES = 20_000;
 const DEFAULT_MAX_MATCHES = 50;
@@ -78,14 +107,21 @@ const isDeniedRelPath = (rel: string): { denied: boolean; reason?: string } => {
   const segments = normalized.split("/").filter(Boolean);
   const base = segments.at(-1) ?? normalized;
 
-  if (segments.includes(".git")) return { denied: true, reason: "Reading .git is blocked" };
-  if (segments.includes("node_modules")) return { denied: true, reason: "Reading node_modules is blocked" };
-  if (segments.includes("output")) return { denied: true, reason: "Reading output is blocked" };
+  if (segments.includes(".git"))
+    return { denied: true, reason: "Reading .git is blocked" };
+  if (segments.includes("node_modules"))
+    return { denied: true, reason: "Reading node_modules is blocked" };
+  if (segments.includes("output"))
+    return { denied: true, reason: "Reading output is blocked" };
 
-  if (base === ".env" || base.startsWith(".env.")) return { denied: true, reason: "Reading .env is blocked" };
-  if (base === "id_rsa" || base.startsWith("id_rsa.")) return { denied: true, reason: "Reading SSH keys is blocked" };
-  if (base.endsWith(".pem")) return { denied: true, reason: "Reading .pem files is blocked" };
-  if (base.endsWith(".key")) return { denied: true, reason: "Reading .key files is blocked" };
+  if (base === ".env" || base.startsWith(".env."))
+    return { denied: true, reason: "Reading .env is blocked" };
+  if (base === "id_rsa" || base.startsWith("id_rsa."))
+    return { denied: true, reason: "Reading SSH keys is blocked" };
+  if (base.endsWith(".pem"))
+    return { denied: true, reason: "Reading .pem files is blocked" };
+  if (base.endsWith(".key"))
+    return { denied: true, reason: "Reading .key files is blocked" };
 
   return { denied: false };
 };
@@ -102,7 +138,9 @@ const resolveInsideRoot = (
     const escaped =
       rel === "" || rel === "."
         ? false
-        : rel.startsWith("..") || rel.split(Path.sep).includes("..") || Path.isAbsolute(rel);
+        : rel.startsWith("..") ||
+          rel.split(Path.sep).includes("..") ||
+          Path.isAbsolute(rel);
 
     if (escaped) {
       return yield* Effect.fail(
@@ -184,11 +222,15 @@ const walkFiles = async (
 
 const listFilesEffect = (rootAbs: string, maxFiles: number) =>
   Effect.tryPromise({
-    try: async () => ({ root: rootAbs, files: await walkFiles(rootAbs, maxFiles) }),
+    try: async () => ({
+      root: rootAbs,
+      files: await walkFiles(rootAbs, maxFiles),
+    }),
     catch: (cause) =>
       new ToolFsError({
         tool: "listFiles",
-        message: cause instanceof Error ? cause.message : "Failed to list files",
+        message:
+          cause instanceof Error ? cause.message : "Failed to list files",
         cause,
       }),
   });
@@ -214,7 +256,9 @@ const searchTextEffect = (rootAbs: string, query: string, maxMatches: number) =>
       if (matches.length >= maxMatches) break;
 
       // Skip obvious binaries by extension (minimal heuristic)
-      if (/\.(png|jpg|jpeg|gif|webp|ico|zip|gz|tgz|jar|pdf|woff2?)$/i.test(rel)) {
+      if (
+        /\.(png|jpg|jpeg|gif|webp|ico|zip|gz|tgz|jar|pdf|woff2?)$/i.test(rel)
+      ) {
         continue;
       }
 
@@ -272,62 +316,153 @@ export const makeRepoTools = (rootDir: string) =>
     const log = yield* EventLog;
     const rootAbs = Path.resolve(rootDir);
 
-    const listFiles = createTool({
-      id: "listFiles",
+    const listFiles = makeTool({
+      name: "listFiles",
       description: "List files under the target directory (safe subset).",
-      inputSchema: z.object({ max: z.number().int().positive().optional() }).optional(),
+      parameters: {
+        type: "object",
+        properties: {
+          max: {
+            type: "integer",
+            minimum: 1,
+            description: "Maximum number of files to return",
+          },
+        },
+        additionalProperties: false,
+      },
       execute: async (input) => {
-        const maxFiles = input?.max ?? DEFAULT_MAX_FILES;
+        const obj =
+          typeof input === "object" && input !== null
+            ? (input as Record<string, unknown>)
+            : {};
+        const max = obj.max;
+        const maxFiles =
+          typeof max === "number" && Number.isFinite(max) && max > 0
+            ? Math.floor(max)
+            : DEFAULT_MAX_FILES;
+
         return await runOrThrow(
           withToolLogging(
             log,
             "listFiles",
             { max: maxFiles },
             listFilesEffect(rootAbs, maxFiles),
-            (out) => ({ fileCount: out.files.length, sample: out.files.slice(0, 20) }),
+            (out) => ({
+              fileCount: out.files.length,
+              sample: out.files.slice(0, 20),
+            }),
           ),
         );
       },
     });
 
-    const searchText = createTool({
-      id: "searchText",
+    const searchText = makeTool({
+      name: "searchText",
       description:
         "Search for a string in text files under the target directory. Returns matching lines (capped).",
-      inputSchema: z.object({
-        query: z.string().min(1),
-        maxMatches: z.number().int().positive().optional(),
-      }),
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            minLength: 1,
+            description: "String to search for",
+          },
+          maxMatches: {
+            type: "integer",
+            minimum: 1,
+            description: "Maximum matches to return",
+          },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
       execute: async (input) => {
-        const maxMatches = input.maxMatches ?? DEFAULT_MAX_MATCHES;
+        const obj =
+          typeof input === "object" && input !== null
+            ? (input as Record<string, unknown>)
+            : null;
+        const query = obj?.query;
+        if (typeof query !== "string" || query.trim().length === 0) {
+          throw new ToolInputError({
+            tool: "searchText",
+            message: "Invalid input: expected { query: string }",
+            input,
+          });
+        }
+
+        const maxMatchesRaw = obj?.maxMatches;
+        const maxMatches =
+          typeof maxMatchesRaw === "number" &&
+          Number.isFinite(maxMatchesRaw) &&
+          maxMatchesRaw > 0
+            ? Math.floor(maxMatchesRaw)
+            : DEFAULT_MAX_MATCHES;
+
         return await runOrThrow(
           withToolLogging(
             log,
             "searchText",
-            { query: input.query, maxMatches },
-            searchTextEffect(rootAbs, input.query, maxMatches),
-            (out) => ({ matchCount: out.matches.length, sample: out.matches.slice(0, 10) }),
+            { query, maxMatches },
+            searchTextEffect(rootAbs, query, maxMatches),
+            (out) => ({
+              matchCount: out.matches.length,
+              sample: out.matches.slice(0, 10),
+            }),
           ),
         );
       },
     });
 
-    const readFile = createTool({
-      id: "readFile",
+    const readFile = makeTool({
+      name: "readFile",
       description:
         "Read a UTF-8 text file under the target directory (safe subset). Returns truncated content if needed.",
-      inputSchema: z.object({
-        path: z.string().min(1),
-        maxBytes: z.number().int().positive().optional(),
-      }),
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            minLength: 1,
+            description: "File path relative to target directory",
+          },
+          maxBytes: {
+            type: "integer",
+            minimum: 1,
+            description: "Maximum bytes to read (truncates)",
+          },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
       execute: async (input) => {
-        const maxBytes = input.maxBytes ?? DEFAULT_MAX_FILE_BYTES;
+        const obj =
+          typeof input === "object" && input !== null
+            ? (input as Record<string, unknown>)
+            : null;
+        const path = obj?.path;
+        if (typeof path !== "string" || path.trim().length === 0) {
+          throw new ToolInputError({
+            tool: "readFile",
+            message: "Invalid input: expected { path: string }",
+            input,
+          });
+        }
+
+        const maxBytesRaw = obj?.maxBytes;
+        const maxBytes =
+          typeof maxBytesRaw === "number" &&
+          Number.isFinite(maxBytesRaw) &&
+          maxBytesRaw > 0
+            ? Math.floor(maxBytesRaw)
+            : DEFAULT_MAX_FILE_BYTES;
+
         return await runOrThrow(
           withToolLogging(
             log,
             "readFile",
-            { path: input.path, maxBytes },
-            readFileEffect(rootAbs, input.path, maxBytes),
+            { path, maxBytes },
+            readFileEffect(rootAbs, path, maxBytes),
             (out) => ({
               path: out.path,
               bytes: out.content.length,
@@ -339,5 +474,7 @@ export const makeRepoTools = (rootDir: string) =>
       },
     });
 
+    // ToolsInput type comes from @mastra/core; we keep runtime compatibility here
+    // while staying Zod-free by providing JSON-schema-like tool parameters.
     return { listFiles, searchText, readFile } as const;
   });

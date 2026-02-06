@@ -2,6 +2,19 @@
 
 This report documents how Effect-TS is used in the mastra-effect project, covering core concepts, dependency injection, error handling, async patterns, Mastra AI integration, and testing strategies.
 
+## Diagrams Index
+
+- 1.1 Effect type mental model
+- 2.2 Layered DI (Context + Layer)
+- 2.6 How `provide` satisfies `R`
+- 2.6 `provideMerge` (pre-wiring layer dependencies)
+- 3.4 Effect -> Exit -> throw/return (`runOrThrow`)
+- 3.5 Exit for logging + re-propagation (`withToolLogging`)
+- 4.2 Retry decision flow (Schedule)
+- 4.3 `withTimeout(fetch)` (AbortController + upstream signal)
+- 5.2 Repo tool safety pipeline (deny rules + root sandbox)
+- 5.4 Tool loop (Agent <-> Model <-> Tools)
+
 ---
 
 ## 1. Effect-TS Core Concepts
@@ -9,14 +22,36 @@ This report documents how Effect-TS is used in the mastra-effect project, coveri
 ### 1.1 The Effect Type
 
 `Effect<A, E, R>` is the central type representing a computation that:
+
 - **A** - Succeeds with a value of type A
-- **E** - May fail with an error of type E  
+- **E** - May fail with an error of type E
 - **R** - Requires an environment/context of type R
+
+**Diagram (mental model):**
+
+```text
+Environment R
+     |
+     | provided via Layer / Effect.provide
+     v
+Effect<A, E, R>
+  |-- success --> A (value)
+  `-- failure --> E (typed error)
+```
 
 Key imports used throughout this codebase:
 
 ```typescript
-import { Effect, Context, Layer, Data, Cause, Option, Schedule, Duration } from "effect";
+import {
+  Effect,
+  Context,
+  Layer,
+  Data,
+  Cause,
+  Option,
+  Schedule,
+  Duration,
+} from "effect";
 ```
 
 ### 1.2 Effect.gen - Generator-based Composition
@@ -55,9 +90,9 @@ From `src/mastra.ts` - building a model with dependencies:
 
 ```typescript
 export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
-  const cfg = yield* AppConfig;           // Access AppConfig service from context
+  const cfg = yield* AppConfig; // Access AppConfig service from context
   const client = yield* OpenRouterClient; // Access OpenRouterClient service
-  
+
   const doGenerate: LanguageModelV1["doGenerate"] = async (options) => {
     // ... implementation using cfg and client
   };
@@ -81,8 +116,8 @@ The `pipe` method chains operations in a readable, left-to-right flow:
 program.pipe(
   Effect.provide(LiveLayers),
   Effect.retry(retrySchedule),
-  Effect.timeout(Duration.seconds(60))
-)
+  Effect.timeout(Duration.seconds(60)),
+);
 ```
 
 From `src/openrouter.ts`:
@@ -98,11 +133,13 @@ return {
 The codebase uses several Effect constructors:
 
 **Effect.succeed** - Wrap a pure value:
+
 ```typescript
 return Effect.succeed(trimmed);
 ```
 
 **Effect.fail** - Create a failed effect with a typed error:
+
 ```typescript
 return Effect.fail(
   new ConfigError({
@@ -113,11 +150,13 @@ return Effect.fail(
 ```
 
 **Effect.sync** - Wrap a synchronous computation:
+
 ```typescript
-Effect.sync(() => process.env[key])
+Effect.sync(() => process.env[key]);
 ```
 
 **Effect.tryPromise** - Wrap a Promise with error handling:
+
 ```typescript
 Effect.tryPromise({
   try: async () => {
@@ -131,17 +170,20 @@ Effect.tryPromise({
       cause: e,
     });
   },
-})
+});
 ```
 
 **Effect.flatMap** - Sequential composition:
+
 ```typescript
 const readRequiredEnv = (key: string) =>
   Effect.sync(() => process.env[key]).pipe(
     Effect.flatMap((value) => {
       const trimmed = value?.trim() ?? "";
       if (trimmed.length === 0) {
-        return Effect.fail(new ConfigError({ key, message: `Missing required env var ${key}` }));
+        return Effect.fail(
+          new ConfigError({ key, message: `Missing required env var ${key}` }),
+        );
       }
       return Effect.succeed(trimmed);
     }),
@@ -186,11 +228,27 @@ export const AppConfigLive = Layer.effect(AppConfig, readAppConfig);
 
 ### 2.2 Services in This Codebase
 
-| Service | File | Tag Definition | Layer Type |
-|---------|------|----------------|------------|
-| `AppConfig` | `src/config.ts:19` | `Context.GenericTag<AppConfig>("AppConfig")` | `Layer.effect` (async) |
+| Service            | File                    | Tag Definition                                             | Layer Type             |
+| ------------------ | ----------------------- | ---------------------------------------------------------- | ---------------------- |
+| `AppConfig`        | `src/config.ts:19`      | `Context.GenericTag<AppConfig>("AppConfig")`               | `Layer.effect` (async) |
 | `OpenRouterClient` | `src/openrouter.ts:104` | `Context.GenericTag<OpenRouterClient>("OpenRouterClient")` | `Layer.effect` (async) |
-| `EventLog` | `src/tools.ts:31` | `Context.GenericTag<EventLog>("EventLog")` | `Layer.succeed` (sync) |
+| `EventLog`         | `src/tools.ts:31`       | `Context.GenericTag<EventLog>("EventLog")`                 | `Layer.succeed` (sync) |
+
+**Diagram: Layered DI (Context + Layer)**
+
+```text
+Layers produce services (Context tags):
+
+  AppConfigLive         ----->  [AppConfig]
+  EventLogLive          ----->  [EventLog]
+  OpenRouterClientLive  ----->  [OpenRouterClient]
+
+Dependencies ("requires"):
+
+  OpenRouterClientLive requires [AppConfig]
+  makeOpenRouterLanguageModelV1 requires [AppConfig] + [OpenRouterClient]
+  makeRepoTools requires [EventLog]
+```
 
 ### 2.3 OpenRouterClient Service
 
@@ -201,26 +259,33 @@ From `src/openrouter.ts`:
 export type OpenRouterClient = {
   chatCompletions: (
     body: OpenRouterChatCompletionRequest,
-  ) => Effect.Effect<OpenRouterResponse<OpenRouterChatCompletionResponse>, OpenRouterError>;
+  ) => Effect.Effect<
+    OpenRouterResponse<OpenRouterChatCompletionResponse>,
+    OpenRouterError
+  >;
 };
 
 // Context tag
-export const OpenRouterClient = Context.GenericTag<OpenRouterClient>("OpenRouterClient");
+export const OpenRouterClient =
+  Context.GenericTag<OpenRouterClient>("OpenRouterClient");
 
 // Layer implementation (depends on AppConfig)
 export const OpenRouterClientLive = Layer.effect(
   OpenRouterClient,
   Effect.gen(function* () {
-    const cfg = yield* AppConfig;  // Access dependency
+    const cfg = yield* AppConfig; // Access dependency
     const url = `${cfg.baseUrl}/chat/completions`;
 
     const request = (body: OpenRouterChatCompletionRequest) =>
-      Effect.tryPromise({ /* ... */ });
+      Effect.tryPromise({
+        /* ... */
+      });
 
     const retrySchedule = Schedule.intersect(/* ... */);
 
     return {
-      chatCompletions: (body) => request(body).pipe(Effect.retry(retrySchedule)),
+      chatCompletions: (body) =>
+        request(body).pipe(Effect.retry(retrySchedule)),
     } satisfies OpenRouterClient;
   }),
 );
@@ -259,31 +324,70 @@ Inside `Effect.gen`, use `yield*` with the Context tag:
 
 ```typescript
 Effect.gen(function* () {
-  const cfg = yield* AppConfig;           // Type: AppConfig
+  const cfg = yield* AppConfig; // Type: AppConfig
   const client = yield* OpenRouterClient; // Type: OpenRouterClient
-  const log = yield* EventLog;            // Type: EventLog
+  const log = yield* EventLog; // Type: EventLog
 });
 ```
 
 ### 2.6 Providing Layers
 
 **Single layer:**
+
 ```typescript
-program.pipe(Effect.provide(AppConfigLive))
+program.pipe(Effect.provide(AppConfigLive));
+```
+
+**Diagram: How `provide` Satisfies R**
+
+```text
+Before providing:
+
+  program : Effect<A, E, AppConfig>
+                     ^ needs this environment
+
+After providing:
+
+  program.pipe(Effect.provide(AppConfigLive)) : Effect<A, E, never>
+                                               ^ no environment required
+
+Intuition:
+  Layer builds a runtime value for a Context tag, and `provide(...)` attaches it
+  to the Effect so `yield* AppConfig` can succeed at runtime.
 ```
 
 **Multiple layers with dependencies:**
 
-From `.mastra/.build/entry-0.mjs`:
+From `src/mastra/index.ts`:
+
 ```typescript
-const Live = Layer.mergeAll(
+const ConfigLayer = USE_MOCK
+  ? Layer.succeed(AppConfig, mockConfig)
+  : AppConfigLive;
+const ClientLayer = USE_MOCK
+  ? Layer.succeed(OpenRouterClient, createSmartMockClient())
+  : OpenRouterClientLive;
+
+const LiveLayers = Layer.mergeAll(
+  Layer.provideMerge(ConfigLayer)(ClientLayer),
   EventLogLive,
-  Layer.provideMerge(AppConfigLive)(OpenRouterClientLive)
 );
-program.pipe(Effect.provide(Live))
 ```
 
-The `Layer.provideMerge(AppConfigLive)(OpenRouterClientLive)` pattern provides `AppConfig` to `OpenRouterClientLive` since the OpenRouter client depends on configuration.
+The `Layer.provideMerge(ConfigLayer)(ClientLayer)` pattern provides `AppConfig` to `OpenRouterClientLive` (or the mock client), since the OpenRouter client depends on configuration.
+
+**Diagram: `provideMerge` (Pre-wiring Layer Dependencies)**
+
+```text
+ConfigLayer produces: [AppConfig]
+ClientLayer requires: [AppConfig]  -> produces: [OpenRouterClient]
+
+Layer.provideMerge(ConfigLayer)(ClientLayer):
+  - runs ConfigLayer
+  - feeds [AppConfig] into ClientLayer
+  - outputs a combined layer that provides both:
+      [AppConfig] + [OpenRouterClient]
+```
 
 ### 2.7 Layer Composition Functions
 
@@ -301,6 +405,7 @@ The `Layer.provideMerge(AppConfigLive)(OpenRouterClientLive)` pattern provides `
 Effect-TS uses discriminated unions for typed errors. Each error type extends `Data.TaggedError`:
 
 From `src/config.ts`:
+
 ```typescript
 export class ConfigError extends Data.TaggedError("ConfigError")<{
   key: string;
@@ -309,19 +414,26 @@ export class ConfigError extends Data.TaggedError("ConfigError")<{
 ```
 
 From `src/openrouter.ts`:
+
 ```typescript
-export class OpenRouterNetworkError extends Data.TaggedError("OpenRouterNetworkError")<{
+export class OpenRouterNetworkError extends Data.TaggedError(
+  "OpenRouterNetworkError",
+)<{
   message: string;
   cause?: unknown;
 }> {}
 
-export class OpenRouterHttpError extends Data.TaggedError("OpenRouterHttpError")<{
+export class OpenRouterHttpError extends Data.TaggedError(
+  "OpenRouterHttpError",
+)<{
   status: number;
   statusText: string;
   bodyText: string;
 }> {}
 
-export class OpenRouterParseError extends Data.TaggedError("OpenRouterParseError")<{
+export class OpenRouterParseError extends Data.TaggedError(
+  "OpenRouterParseError",
+)<{
   message: string;
   bodyText: string;
 }> {}
@@ -334,6 +446,7 @@ export type OpenRouterError =
 ```
 
 From `src/tools.ts`:
+
 ```typescript
 export class ToolDeniedError extends Data.TaggedError("ToolDeniedError")<{
   tool: string;
@@ -349,6 +462,7 @@ export class ToolFsError extends Data.TaggedError("ToolFsError")<{
 ```
 
 From `src/mastra.ts`:
+
 ```typescript
 export class ModelAdapterError extends Data.TaggedError("ModelAdapterError")<{
   message: string;
@@ -359,22 +473,25 @@ export class ModelAdapterError extends Data.TaggedError("ModelAdapterError")<{
 ### 3.2 Creating and Propagating Errors
 
 **Fail with a typed error:**
+
 ```typescript
-Effect.fail(new ConfigError({ key: "GROK_KEY", message: "Missing" }))
+Effect.fail(new ConfigError({ key: "GROK_KEY", message: "Missing" }));
 ```
 
 **In tryPromise catch handler:**
+
 ```typescript
 Effect.tryPromise({
   try: () => fetch(url),
   catch: (e) => {
     if (e instanceof OpenRouterHttpError) return e;
     return new OpenRouterNetworkError({ message: String(e), cause: e });
-  }
-})
+  },
+});
 ```
 
 **Conditional error in Effect.gen:**
+
 ```typescript
 Effect.gen(function* () {
   const abs = Path.resolve(rootAbs, userPath);
@@ -401,7 +518,7 @@ Effect.gen(function* () {
 const exit = await Effect.runPromiseExit(program);
 
 if (exit._tag === "Success") {
-  return exit.value;  // Type: A
+  return exit.value; // Type: A
 }
 
 if (exit._tag === "Failure") {
@@ -409,7 +526,7 @@ if (exit._tag === "Failure") {
   const err = Cause.failureOption(exit.cause);
   if (Option.isSome(err)) {
     // err.value is the typed error (ConfigError | OpenRouterHttpError | ...)
-    console.log(err.value._tag);  // "ConfigError", "OpenRouterHttpError", etc.
+    console.log(err.value._tag); // "ConfigError", "OpenRouterHttpError", etc.
   }
 }
 ```
@@ -419,18 +536,36 @@ if (exit._tag === "Failure") {
 This pattern bridges Effect to Promise-based APIs (required for Mastra integration):
 
 From `src/tools.ts` and `src/mastra.ts`:
+
 ```typescript
 const runOrThrow = async <A, E>(eff: Effect.Effect<A, E>): Promise<A> => {
   const exit = await Effect.runPromiseExit(eff);
   if (exit._tag === "Failure") {
     const err = Cause.failureOption(exit.cause);
     if (Option.isSome(err)) {
-      throw err.value;  // Throw the typed error
+      throw err.value; // Throw the typed error
     }
-    throw exit.cause;   // Throw the full cause if no simple failure
+    throw exit.cause; // Throw the full cause if no simple failure
   }
   return exit.value;
 };
+```
+
+**Diagram: Effect -> Exit -> Throw / Return**
+
+```text
+Effect<A, E>
+  |
+  v
+Effect.runPromiseExit(...)
+  |
+  +--> Exit.Success(value: A) -----------------------> return value
+  |
+  `--> Exit.Failure(cause)
+         |
+         +--> Cause.failureOption(cause) = Some(e:E) -> throw e (typed error)
+         |
+         `--> None -------------------------------> throw cause (full chain)
 ```
 
 ### 3.5 Effect.exit for Result Capture
@@ -438,6 +573,7 @@ const runOrThrow = async <A, E>(eff: Effect.Effect<A, E>): Promise<A> => {
 `Effect.exit` captures success/failure without throwing, useful for logging:
 
 From `src/tools.ts` - `withToolLogging`:
+
 ```typescript
 const withToolLogging = <A, E>(
   log: EventLog,
@@ -449,13 +585,13 @@ const withToolLogging = <A, E>(
   Effect.gen(function* () {
     yield* log.emit({ type: "tool:start", tool, input });
     const startedAt = yield* Effect.sync(() => Date.now());
-    const exit = yield* Effect.exit(eff);  // Capture without throwing
+    const exit = yield* Effect.exit(eff); // Capture without throwing
     const durationMs = (yield* Effect.sync(() => Date.now())) - startedAt;
 
     if (exit._tag === "Failure") {
       const cause = exit.cause;
       yield* log.emit({ type: "tool:error", tool, durationMs, error: cause });
-      return yield* Effect.failCause(cause);  // Re-propagate the error
+      return yield* Effect.failCause(cause); // Re-propagate the error
     }
 
     const value = exit.value;
@@ -469,6 +605,23 @@ const withToolLogging = <A, E>(
   });
 ```
 
+**Diagram: Exit for Logging + Re-propagation**
+
+```text
+withToolLogging(log, tool, input, eff):
+  emit tool:start
+  startedAt = now
+  exit = Effect.exit(eff)          (does not throw)
+  durationMs = now - startedAt
+
+  if exit is Failure(cause):
+    emit tool:error(durationMs, cause)
+    failCause(cause)               (re-propagate failure)
+  else Success(value):
+    emit tool:success(durationMs, summary(value))
+    succeed(value)
+```
+
 ---
 
 ## 4. Async Patterns
@@ -478,10 +631,14 @@ const withToolLogging = <A, E>(
 Wraps Promise-based APIs with proper error handling:
 
 From `src/openrouter.ts`:
+
 ```typescript
 const request = (
   body: OpenRouterChatCompletionRequest,
-): Effect.Effect<OpenRouterResponse<OpenRouterChatCompletionResponse>, OpenRouterError> =>
+): Effect.Effect<
+  OpenRouterResponse<OpenRouterChatCompletionResponse>,
+  OpenRouterError
+> =>
   Effect.tryPromise({
     try: async () => {
       const resp = await withTimeout(
@@ -533,7 +690,10 @@ const request = (
       }
 
       if (e instanceof Error && (e as any).name === "AbortError") {
-        return new OpenRouterNetworkError({ message: "Request aborted", cause: e });
+        return new OpenRouterNetworkError({
+          message: "Request aborted",
+          cause: e,
+        });
       }
 
       return new OpenRouterNetworkError({
@@ -545,6 +705,7 @@ const request = (
 ```
 
 From `src/tools.ts`:
+
 ```typescript
 const safeReadTextFile = (
   tool: string,
@@ -575,16 +736,21 @@ Effect provides composable retry schedules. From `src/openrouter.ts`:
 const MAX_RETRIES = 3;
 
 const isRetriableStatus = (status: number): boolean =>
-  status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+  status === 408 ||
+  status === 409 ||
+  status === 425 ||
+  status === 429 ||
+  status >= 500;
 
 const retrySchedule = Schedule.intersect(
-  Schedule.exponential(Duration.millis(200)),  // 200ms, 400ms, 800ms...
-  Schedule.recurs(MAX_RETRIES - 1),            // Max 3 retries total
+  Schedule.exponential(Duration.millis(200)), // 200ms, 400ms, 800ms...
+  Schedule.recurs(MAX_RETRIES - 1), // Max 3 retries total
 ).pipe(
   Schedule.whileInput((err: OpenRouterError) => {
-    if (err instanceof OpenRouterNetworkError) return true;  // Always retry network errors
-    if (err instanceof OpenRouterParseError) return false;   // Never retry parse errors
-    if (err instanceof OpenRouterHttpError) return isRetriableStatus(err.status);
+    if (err instanceof OpenRouterNetworkError) return true; // Always retry network errors
+    if (err instanceof OpenRouterParseError) return false; // Never retry parse errors
+    if (err instanceof OpenRouterHttpError)
+      return isRetriableStatus(err.status);
     return false;
   }),
 );
@@ -595,7 +761,31 @@ return {
 } satisfies OpenRouterClient;
 ```
 
+**Diagram: Retry Decision Flow**
+
+```text
+request(body)
+  |
+  v
+Effect.retry(retrySchedule)
+  |
+  +--> success -------------------------------> return response
+  |
+  `--> failure (OpenRouterError)
+         |
+         v
+   whileInput(err) ?
+     | true                         | false
+     v                              v
+  wait (exponential backoff)     propagate failure
+  + limit (recurs MAX_RETRIES-1)
+     |
+     v
+   retry request(body)
+```
+
 **Schedule combinators used:**
+
 - `Schedule.exponential(Duration.millis(200))` - Exponential backoff starting at 200ms
 - `Schedule.recurs(n)` - Limit to n retries
 - `Schedule.intersect(a, b)` - Both schedules must allow retry
@@ -606,7 +796,27 @@ return {
 The codebase uses a custom `withTimeout` wrapper for fetch, but Effect also provides:
 
 ```typescript
-Effect.timeout(Duration.seconds(60))
+Effect.timeout(Duration.seconds(60));
+```
+
+**Diagram: withTimeout(fetch)**
+
+```text
+withTimeout(url, init, timeoutMs):
+  upstream signal (optional) ----+
+                                |
+                                v
+                         +--------------+
+                         | AbortController
+                         +--------------+
+                                |
+                setTimeout ---->+---- abort("timeout") if still pending
+                                |
+                                v
+                         fetch(url, { ..., signal })
+                                |
+                                v
+                       response or AbortError
 ```
 
 ### 4.4 Effect.void
@@ -615,7 +825,7 @@ For effects that produce no meaningful value:
 
 ```typescript
 export const EventLogSilent = Layer.succeed(EventLog, {
-  emit: () => Effect.void,  // Produces void, no-op
+  emit: () => Effect.void, // Produces void, no-op
 } satisfies EventLog);
 ```
 
@@ -633,8 +843,8 @@ export const makeRepoQaAgent = (opts: {
   tools: ToolsInput;
 }) =>
   new Agent({
-    id: "repo-qa",
-    name: "repo-qa",
+    id: "repoQa",
+    name: "repoQa",
     instructions:
       "You answer questions about a local directory by calling tools. Cite evidence by naming files and line numbers where possible.",
     model: opts.model,
@@ -668,77 +878,120 @@ export const makeJudgeAgent = (opts: { model: MastraLegacyLanguageModel }) =>
 
 ### 5.2 Tool Definitions
 
-Tools use `createTool` from `@mastra/core/tools` but execute Effect programs internally:
+Tools are represented as plain "function tool" objects (Mastra/AI-SDK compatible) but execute Effect programs internally.
+
+This repo intentionally avoids Zod; tool inputs use JSON-Schema-like `parameters` plus lightweight runtime validation/coercion inside `execute`.
 
 From `src/tools.ts`:
+
 ```typescript
 export const makeRepoTools = (rootDir: string) =>
   Effect.gen(function* () {
-    const log = yield* EventLog;  // Access EventLog from context
+    const log = yield* EventLog; // Access EventLog from context
     const rootAbs = Path.resolve(rootDir);
 
-    const listFiles = createTool({
-      id: "listFiles",
+    const listFiles = {
+      type: "function" as const,
+      name: "listFiles",
       description: "List files under the target directory (safe subset).",
-      inputSchema: z.object({ max: z.number().int().positive().optional() }).optional(),
-      execute: async (input) => {
-        const maxFiles = input?.max ?? DEFAULT_MAX_FILES;
-        return await runOrThrow(  // Bridge Effect to Promise
+      parameters: {
+        type: "object",
+        properties: { max: { type: "integer", minimum: 1 } },
+        additionalProperties: false,
+      },
+      execute: async (input: unknown) => {
+        const obj =
+          typeof input === "object" && input !== null
+            ? (input as Record<string, unknown>)
+            : {};
+        const max = obj.max;
+        const maxFiles =
+          typeof max === "number" && Number.isFinite(max) && max > 0
+            ? Math.floor(max)
+            : DEFAULT_MAX_FILES;
+
+        return await runOrThrow(
+          // Bridge Effect to Promise
           withToolLogging(
             log,
             "listFiles",
             { max: maxFiles },
             listFilesEffect(rootAbs, maxFiles),
-            (out) => ({ fileCount: out.files.length, sample: out.files.slice(0, 20) }),
+            (out) => ({
+              fileCount: out.files.length,
+              sample: out.files.slice(0, 20),
+            }),
           ),
         );
       },
-    });
+    };
 
-    const searchText = createTool({
-      id: "searchText",
-      description: "Search for a string in text files under the target directory.",
-      inputSchema: z.object({
-        query: z.string().min(1),
-        maxMatches: z.number().int().positive().optional(),
-      }),
-      execute: async (input) => {
-        const maxMatches = input.maxMatches ?? DEFAULT_MAX_MATCHES;
-        return await runOrThrow(
-          withToolLogging(
-            log,
-            "searchText",
-            { query: input.query, maxMatches },
-            searchTextEffect(rootAbs, input.query, maxMatches),
-            (out) => ({ matchCount: out.matches.length }),
-          ),
-        );
+    // searchText + readFile follow the same pattern: JSON-schema-like parameters,
+    // manual validation/coercion in execute, then run an Effect program.
+
+    const searchText = {
+      type: "function" as const,
+      name: "searchText",
+      description:
+        "Search for a string in text files under the target directory.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1 },
+          maxMatches: { type: "integer", minimum: 1 },
+        },
+        required: ["query"],
+        additionalProperties: false,
       },
-    });
+      execute: async (input: unknown) => {
+        // Validate/coerce `input`, then:
+        // return await runOrThrow(withToolLogging(log, "searchText", ..., searchTextEffect(...), ...))
+      },
+    };
 
-    const readFile = createTool({
-      id: "readFile",
+    const readFile = {
+      type: "function" as const,
+      name: "readFile",
       description: "Read a UTF-8 text file under the target directory.",
-      inputSchema: z.object({
-        path: z.string().min(1),
-        maxBytes: z.number().int().positive().optional(),
-      }),
-      execute: async (input) => {
-        const maxBytes = input.maxBytes ?? DEFAULT_MAX_FILE_BYTES;
-        return await runOrThrow(
-          withToolLogging(
-            log,
-            "readFile",
-            { path: input.path, maxBytes },
-            readFileEffect(rootAbs, input.path, maxBytes),
-            (out) => ({ path: out.path, bytes: out.content.length, truncated: out.truncated }),
-          ),
-        );
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", minLength: 1 },
+          maxBytes: { type: "integer", minimum: 1 },
+        },
+        required: ["path"],
+        additionalProperties: false,
       },
-    });
+      execute: async (input: unknown) => {
+        // Validate/coerce `input`, then:
+        // return await runOrThrow(withToolLogging(log, "readFile", ..., readFileEffect(...), ...))
+      },
+    };
 
     return { listFiles, searchText, readFile } as const;
   });
+```
+
+**Diagram: Repo Tool Safety Pipeline**
+
+```text
+Tool input (unknown)
+  |
+  v
+coerce/validate (throw ToolInputError if invalid)
+  |
+  v
+resolveInsideRoot(rootAbs, userPath)
+  |
+  +--> escapes root? or denied path? ----> ToolDeniedError
+  |
+  `--> ok
+        |
+        v
+   safeReadTextFile / walkFiles
+        |
+        v
+   output (possibly truncated) + EventLog events
 ```
 
 ### 5.3 Model Adapter
@@ -759,9 +1012,11 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
       // ... other options
     };
 
-    const { body: resp, headers } = await runOrThrow(client.chatCompletions(requestBody));
+    const { body: resp, headers } = await runOrThrow(
+      client.chatCompletions(requestBody),
+    );
     // ... process response
-    return { finishReason, usage, text, toolCalls, /* ... */ };
+    return { finishReason, usage, text, toolCalls /* ... */ };
   };
 
   const model: MastraLegacyLanguageModel = {
@@ -781,19 +1036,52 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
 The entry point composes all layers and runs the Effect program:
 
 ```typescript
-const Live = Layer.mergeAll(
+const LiveLayers = Layer.mergeAll(
+  Layer.provideMerge(ConfigLayer)(ClientLayer),
   EventLogLive,
-  Layer.provideMerge(AppConfigLive)(OpenRouterClientLive)
 );
 
-const program = Effect.gen(function* () {
-  const cfg = yield* AppConfig;
-  const tools = yield* makeRepoTools(cfg.demoTargetDir);
-  const model = yield* makeOpenRouterLanguageModelV1;
-  return makeRepoQaAgent({ model, tools });
-});
+const agents = await Effect.runPromise(
+  Effect.gen(function* () {
+    const cfg = yield* AppConfig;
+    const tools = yield* makeRepoTools(cfg.demoTargetDir);
+    const model = yield* makeOpenRouterLanguageModelV1;
 
-const agent = await Effect.runPromise(program.pipe(Effect.provide(Live)));
+    return {
+      repoQa: makeRepoQaAgent({ model, tools }),
+      debaterA: makeDebaterAgent({
+        id: "debaterA",
+        instructions: "...",
+        model,
+        tools,
+      }),
+      debaterB: makeDebaterAgent({
+        id: "debaterB",
+        instructions: "...",
+        model,
+        tools,
+      }),
+      judge: makeJudgeAgent({ model }),
+    } as const;
+  }).pipe(Effect.provide(LiveLayers)),
+);
+
+export const mastra = new Mastra({ agents, logger });
+```
+
+**Diagram: Tool Loop (Agent <-> Model <-> Tools)**
+
+```text
+User -> Mastra -> ModelAdapter -> OpenRouterClient (Effect: retry + timeout) -> fetch()
+fetch() -> OpenRouterClient -> ModelAdapter -> Mastra -> User
+
+If the model returns tool_calls:
+  ModelAdapter -> Mastra: tool_calls
+  Mastra -> Repo Tools: execute(args)
+  Repo Tools -> Local FS: list/search/read (safe subset)
+  Local FS -> Repo Tools -> Mastra: tool_result
+  Mastra -> ModelAdapter: prompt + tool_result
+  ...repeat until the model returns final text...
 ```
 
 ---
@@ -805,6 +1093,7 @@ const agent = await Effect.runPromise(program.pipe(Effect.provide(Live)));
 Effect's Layer system makes it easy to replace services with test implementations:
 
 From `test/openrouter.test.ts`:
+
 ```typescript
 const TestConfigLive = (overrides: Partial<AppConfigType> = {}) =>
   Layer.succeed(AppConfig, {
@@ -819,6 +1108,7 @@ const TestConfigLive = (overrides: Partial<AppConfigType> = {}) =>
 ```
 
 From `test/integration_fake_llm.test.ts`:
+
 ```typescript
 const LiveLayers = [
   Layer.succeed(AppConfig, cfg),
@@ -854,7 +1144,10 @@ const fakeClient: OpenRouterClientType = {
                     {
                       id: "tc1",
                       type: "function",
-                      function: { name: "listFiles", arguments: JSON.stringify({ max: 5 }) },
+                      function: {
+                        name: "listFiles",
+                        arguments: JSON.stringify({ max: 5 }),
+                      },
                     },
                   ],
                 },
@@ -891,6 +1184,7 @@ const fakeClient: OpenRouterClientType = {
 Test error conditions using `Effect.runPromiseExit`:
 
 From `test/config.test.ts`:
+
 ```typescript
 it("fails fast when GROK_KEY is missing", async () => {
   await withEnv(
@@ -902,11 +1196,11 @@ it("fails fast when GROK_KEY is missing", async () => {
       const exit = await Effect.runPromiseExit(readAppConfig);
       expect(exit._tag).toBe("Failure");
       if (exit._tag !== "Failure") return;
-      
+
       const err = Cause.failureOption(exit.cause);
       expect(Option.isSome(err)).toBe(true);
       if (!Option.isSome(err)) return;
-      
+
       expect(err.value).toMatchObject({ _tag: "ConfigError", key: "GROK_KEY" });
     },
   );
@@ -914,6 +1208,7 @@ it("fails fast when GROK_KEY is missing", async () => {
 ```
 
 From `test/openrouter.test.ts`:
+
 ```typescript
 it("maps non-2xx to OpenRouterHttpError", async () => {
   const fetchMock = vi.fn(async () => new Response("nope", { status: 400 }));
@@ -925,16 +1220,20 @@ it("maps non-2xx to OpenRouterHttpError", async () => {
   });
 
   const exit = await Effect.runPromiseExit(
-    program.pipe(Effect.provide([Layer.provideMerge(TestConfigLive())(OpenRouterClientLive)])),
+    program.pipe(
+      Effect.provide([
+        Layer.provideMerge(TestConfigLive())(OpenRouterClientLive),
+      ]),
+    ),
   );
-  
+
   expect(exit._tag).toBe("Failure");
   if (exit._tag !== "Failure") return;
-  
+
   const err = Cause.failureOption(exit.cause);
   expect(Option.isSome(err)).toBe(true);
   if (!Option.isSome(err)) return;
-  
+
   expect(err.value).toBeInstanceOf(OpenRouterHttpError);
 });
 ```
@@ -942,6 +1241,7 @@ it("maps non-2xx to OpenRouterHttpError", async () => {
 ### 6.4 Testing Retry Behavior
 
 From `test/openrouter.test.ts`:
+
 ```typescript
 it("retries on 429", async () => {
   let calls = 0;
@@ -952,7 +1252,13 @@ it("retries on 429", async () => {
     }
     return new Response(
       JSON.stringify({
-        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "ok" },
+            finish_reason: "stop",
+          },
+        ],
         usage: { prompt_tokens: 1, completion_tokens: 1 },
       }),
       { status: 200 },
@@ -961,16 +1267,21 @@ it("retries on 429", async () => {
   globalThis.fetch = fetchMock;
 
   await Effect.runPromise(
-    program.pipe(Effect.provide([Layer.provideMerge(TestConfigLive())(OpenRouterClientLive)])),
+    program.pipe(
+      Effect.provide([
+        Layer.provideMerge(TestConfigLive())(OpenRouterClientLive),
+      ]),
+    ),
   );
-  
-  expect(fetchMock).toHaveBeenCalledTimes(2);  // Retried once
+
+  expect(fetchMock).toHaveBeenCalledTimes(2); // Retried once
 });
 ```
 
 ### 6.5 Full Integration Test
 
 From `test/integration_fake_llm.test.ts`:
+
 ```typescript
 it("executes one tool call then finishes", async () => {
   const dir = await makeTempDir();
@@ -997,7 +1308,7 @@ it("executes one tool call then finishes", async () => {
   );
 
   const out = await agent.generateLegacy("List files then say Done.");
-  
+
   expect(out.text).toContain("Done.");
   expect(events.some((e) => e.type === "tool:start" && e.tool === "listFiles")).toBe(true);
   expect(events.some((e) => e.type === "tool:success" && e.tool === "listFiles")).toBe(true);

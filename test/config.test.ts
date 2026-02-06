@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@rstest/core";
 import { Cause, Effect, Option } from "effect";
 import { readAppConfig } from "../src/config.js";
 
-const withEnv = async (env: Record<string, string | undefined>, run: () => Promise<void>) => {
+const withEnv = async (
+  env: Record<string, string | undefined>,
+  run: () => Promise<void>,
+) => {
   const previous = { ...process.env };
   try {
     for (const [k, v] of Object.entries(env)) {
@@ -32,7 +35,10 @@ describe("config", () => {
         const err = Cause.failureOption(exit.cause);
         expect(Option.isSome(err)).toBe(true);
         if (!Option.isSome(err)) return;
-        expect(err.value).toMatchObject({ _tag: "ConfigError", key: "GROK_KEY" });
+        expect(err.value).toMatchObject({
+          _tag: "ConfigError",
+          key: "GROK_KEY",
+        });
       },
     );
   });
@@ -50,7 +56,10 @@ describe("config", () => {
         const err = Cause.failureOption(exit.cause);
         expect(Option.isSome(err)).toBe(true);
         if (!Option.isSome(err)) return;
-        expect(err.value).toMatchObject({ _tag: "ConfigError", key: "GROK_MODEL" });
+        expect(err.value).toMatchObject({
+          _tag: "ConfigError",
+          key: "GROK_MODEL",
+        });
       },
     );
   });

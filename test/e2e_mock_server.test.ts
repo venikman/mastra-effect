@@ -4,7 +4,7 @@
  * Tests the full flow: start mock server → call API → verify response.
  * No real AI calls are made.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "@rstest/core";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as http from "node:http";
 
@@ -48,7 +48,10 @@ const request = (
   });
 
 // Helper to wait for server to be ready
-const waitForServer = async (maxAttempts = 30, delayMs = 200): Promise<void> => {
+const waitForServer = async (
+  maxAttempts = 30,
+  delayMs = 200,
+): Promise<void> => {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const { status } = await request("GET", "/");
@@ -214,14 +217,16 @@ describe("E2E: Mock Server", () => {
 
   describe("CORS", () => {
     it("responds to OPTIONS preflight", async () => {
-      const { status } = await new Promise<{ status: number }>((resolve, reject) => {
-        const url = new URL("/api/agents/repoQa/generate-legacy", BASE_URL);
-        const req = http.request(url, { method: "OPTIONS" }, (res) => {
-          resolve({ status: res.statusCode ?? 0 });
-        });
-        req.on("error", reject);
-        req.end();
-      });
+      const { status } = await new Promise<{ status: number }>(
+        (resolve, reject) => {
+          const url = new URL("/api/agents/repoQa/generate-legacy", BASE_URL);
+          const req = http.request(url, { method: "OPTIONS" }, (res) => {
+            resolve({ status: res.statusCode ?? 0 });
+          });
+          req.on("error", reject);
+          req.end();
+        },
+      );
 
       expect(status).toBe(204);
     });
@@ -252,10 +257,14 @@ describe("E2E: Mock Server with MastraClient", () => {
     // Dynamic import to avoid issues if client not available
     const { MastraClient } = await import("@mastra/client-js");
 
-    const client = new MastraClient({ baseUrl: `http://localhost:${PORT + 1}` });
+    const client = new MastraClient({
+      baseUrl: `http://localhost:${PORT + 1}`,
+    });
     const agent = client.getAgent("repoQa");
 
-    const response = await agent.generateLegacy({ messages: "How do I test this?" });
+    const response = await agent.generateLegacy({
+      messages: "How do I test this?",
+    });
 
     expect(response.text).toBeDefined();
     expect(response.text).toContain("Mock Response");
@@ -282,5 +291,7 @@ const waitForServerOnPort = async (
     }
     await new Promise((r) => setTimeout(r, delayMs));
   }
-  throw new Error(`Server on port ${port} not ready after ${maxAttempts} attempts`);
+  throw new Error(
+    `Server on port ${port} not ready after ${maxAttempts} attempts`,
+  );
 };

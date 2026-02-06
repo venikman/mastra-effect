@@ -5,28 +5,24 @@
   "scripts": {
     "dev": "mastra dev",
     "dev:mock": "tsx mock/standalone-server.ts",
-    "dev:studio": "concurrently -k -n mock,studio -c yellow,cyan \"npm run mock:openai\" \"sleep 2 && OPENAI_API_KEY=mock-key OPENAI_BASE_URL=http://localhost:4222/v1 mastra dev\"",
-    "mock:openai": "tsx mock/openai-mock-server.ts",
+    "dev:studio": "MOCK_MODE=1 MOCK_SCENARIO=smart mastra dev",
     "demo:qa": "tsx demos/demo1_repo_qa.ts",
     "demo:debate": "tsx demos/demo2_debate.ts",
     "demo:mock": "tsx mock/example-usage.ts",
-    "test": "vitest run",
+    "test": "rstest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.25",
     "@mastra/client-js": "^1.1.0",
     "@mastra/core": "^1.1.0",
     "dotenv": "^17.2.3",
-    "effect": "^3.18.4",
-    "zod": "^3.25.76"
+    "effect": "^3.18.4"
   },
   "devDependencies": {
+    "@rstest/core": "^0.3.3",
     "@types/node": "^22.19.7",
-    "concurrently": "^9.2.1",
     "mastra": "^1.1.0",
     "tsx": "^4.20.5",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.16"
+    "typescript": "^5.9.3"
   }
 }

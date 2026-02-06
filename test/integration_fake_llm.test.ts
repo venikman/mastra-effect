@@ -1,10 +1,13 @@
 import * as Fs from "node:fs/promises";
 import * as Os from "node:os";
 import * as Path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@rstest/core";
 import { Effect, Layer } from "effect";
 import { AppConfig, type AppConfig as AppConfigType } from "../src/config.js";
-import { makeOpenRouterLanguageModelV1, makeRepoQaAgent } from "../src/mastra.js";
+import {
+  makeOpenRouterLanguageModelV1,
+  makeRepoQaAgent,
+} from "../src/mastra.js";
 import {
   OpenRouterClient,
   type OpenRouterClient as OpenRouterClientType,
@@ -44,7 +47,10 @@ describe("integration (fake LLM)", () => {
                         {
                           id: "tc1",
                           type: "function",
-                          function: { name: "listFiles", arguments: JSON.stringify({ max: 5 }) },
+                          function: {
+                            name: "listFiles",
+                            arguments: JSON.stringify({ max: 5 }),
+                          },
                         },
                       ],
                     },
@@ -103,7 +109,11 @@ describe("integration (fake LLM)", () => {
     const out = await agent.generateLegacy("List files then say Done.");
     expect(out.text).toContain("Done.");
 
-    expect(events.some((e) => e.type === "tool:start" && e.tool === "listFiles")).toBe(true);
-    expect(events.some((e) => e.type === "tool:success" && e.tool === "listFiles")).toBe(true);
+    expect(
+      events.some((e) => e.type === "tool:start" && e.tool === "listFiles"),
+    ).toBe(true);
+    expect(
+      events.some((e) => e.type === "tool:success" && e.tool === "listFiles"),
+    ).toBe(true);
   });
 });

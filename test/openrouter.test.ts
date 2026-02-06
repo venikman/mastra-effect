@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "@rstest/core";
 import { Cause, Effect, Layer, Option } from "effect";
 import { AppConfig, type AppConfig as AppConfigType } from "../src/config.js";
 import {
@@ -26,19 +26,27 @@ describe("openrouter client", () => {
   });
 
   it("sends Authorization header and model", async () => {
-    const fetchMock = vi.fn(async (_input: any, init: any) => {
+    let calls = 0;
+    const fetchMock = async (_input: any, init: any) => {
+      calls++;
       const body = JSON.parse(init.body);
       expect(init.headers.authorization).toBe("Bearer test-key");
       expect(body.model).toBe("my-model");
       return new Response(
         JSON.stringify({
-          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "ok" },
+              finish_reason: "stop",
+            },
+          ],
           usage: { prompt_tokens: 1, completion_tokens: 1 },
         }),
         { status: 200 },
       );
-    });
-    globalThis.fetch = fetchMock;
+    };
+    globalThis.fetch = fetchMock as any;
 
     const body: OpenRouterChatCompletionRequest = {
       model: "my-model",
@@ -53,12 +61,16 @@ describe("openrouter client", () => {
 
     const Live = Layer.provideMerge(TestConfigLive())(OpenRouterClientLive);
     await Effect.runPromise(program.pipe(Effect.provide([Live] as const)));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(1);
   });
 
   it("maps non-2xx to OpenRouterHttpError", async () => {
-    const fetchMock = vi.fn(async () => new Response("nope", { status: 400, statusText: "Bad Request" }));
-    globalThis.fetch = fetchMock;
+    let calls = 0;
+    const fetchMock = async () => {
+      calls++;
+      return new Response("nope", { status: 400, statusText: "Bad Request" });
+    };
+    globalThis.fetch = fetchMock as any;
 
     const body: OpenRouterChatCompletionRequest = {
       model: "my-model",
@@ -72,7 +84,11 @@ describe("openrouter client", () => {
     });
 
     const exit = await Effect.runPromiseExit(
-      program.pipe(Effect.provide([Layer.provideMerge(TestConfigLive())(OpenRouterClientLive)] as const)),
+      program.pipe(
+        Effect.provide([
+          Layer.provideMerge(TestConfigLive())(OpenRouterClientLive),
+        ] as const),
+      ),
     );
     expect(exit._tag).toBe("Failure");
     if (exit._tag !== "Failure") return;
@@ -80,25 +96,34 @@ describe("openrouter client", () => {
     expect(Option.isSome(err)).toBe(true);
     if (!Option.isSome(err)) return;
     expect(err.value).toBeInstanceOf(OpenRouterHttpError);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(1);
   });
 
   it("retries on 429", async () => {
     let calls = 0;
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = async () => {
       calls++;
       if (calls === 1) {
-        return new Response("rate limited", { status: 429, statusText: "Too Many Requests" });
+        return new Response("rate limited", {
+          status: 429,
+          statusText: "Too Many Requests",
+        });
       }
       return new Response(
         JSON.stringify({
-          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "ok" },
+              finish_reason: "stop",
+            },
+          ],
           usage: { prompt_tokens: 1, completion_tokens: 1 },
         }),
         { status: 200 },
       );
-    });
-    globalThis.fetch = fetchMock;
+    };
+    globalThis.fetch = fetchMock as any;
 
     const body: OpenRouterChatCompletionRequest = {
       model: "my-model",
@@ -112,8 +137,12 @@ describe("openrouter client", () => {
     });
 
     await Effect.runPromise(
-      program.pipe(Effect.provide([Layer.provideMerge(TestConfigLive())(OpenRouterClientLive)] as const)),
+      program.pipe(
+        Effect.provide([
+          Layer.provideMerge(TestConfigLive())(OpenRouterClientLive),
+        ] as const),
+      ),
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(calls).toBe(2);
   });
 });

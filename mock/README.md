@@ -21,6 +21,7 @@ npm run dev:studio
 ```
 
 This starts:
+
 - Mock OpenAI-compatible server on port 4222
 - Mastra Studio on http://localhost:4111
 
@@ -41,6 +42,7 @@ npm run demo:qa
 The mock server exposes the same API as the real Mastra dev server, so all demos and client code work unchanged. No API keys or environment variables required!
 
 **Environment Variables:**
+
 - `PORT` - Server port (default: 4111)
 - `DEMO_TARGET_DIR` - Directory to analyze (default: ".")
 - `MOCK_SCENARIO` - Mock behavior: "smart" (default) or "echo"
@@ -59,15 +61,15 @@ npm run demo:mock
 ```typescript
 import { Effect, Layer } from "effect";
 import { MockLayers, simpleTextScenario } from "./mock/mock-llm.js";
-import { makeOpenRouterLanguageModelV1, makeRepoQaAgent } from "./src/mastra.js";
+import {
+  makeOpenRouterLanguageModelV1,
+  makeRepoQaAgent,
+} from "./src/mastra.js";
 import { makeRepoTools, EventLogLive } from "./src/tools.js";
 
 const scenario = simpleTextScenario("This is a mock response!");
 
-const layers = Layer.mergeAll(
-  MockLayers(scenario),
-  EventLogLive,
-);
+const layers = Layer.mergeAll(MockLayers(scenario), EventLogLive);
 
 const agent = await Effect.runPromise(
   Effect.gen(function* () {
@@ -141,25 +143,25 @@ const customScenario: MockScenario = {
 
 ## Pre-built Scenarios
 
-| Scenario | Description |
-|----------|-------------|
-| `simpleTextScenario(text)` | Returns a fixed text response |
-| `toolThenAnswerScenario(tool, answer)` | Calls one tool, then returns text |
-| `multiToolScenario(tools[], answer)` | Chains multiple tools, then returns text |
-| `echoScenario` | Echoes back the user's message (debug) |
-| `repoQaDemoScenario` | Full demo: list files → search → read → answer |
+| Scenario                               | Description                                    |
+| -------------------------------------- | ---------------------------------------------- |
+| `simpleTextScenario(text)`             | Returns a fixed text response                  |
+| `toolThenAnswerScenario(tool, answer)` | Calls one tool, then returns text              |
+| `multiToolScenario(tools[], answer)`   | Chains multiple tools, then returns text       |
+| `echoScenario`                         | Echoes back the user's message (debug)         |
+| `repoQaDemoScenario`                   | Full demo: list files → search → read → answer |
 
 ## Layer Helpers
 
 ```typescript
 // Just the mock client
-MockClientLayer(scenario)
+MockClientLayer(scenario);
 
 // Just the mock config (no env vars needed)
-MockConfigLayer({ demoTargetDir: "./my-project" })
+MockConfigLayer({ demoTargetDir: "./my-project" });
 
 // Both combined
-MockLayers(scenario, { demoTargetDir: "./my-project" })
+MockLayers(scenario, { demoTargetDir: "./my-project" });
 ```
 
 ## Testing with Mocks
@@ -167,18 +169,18 @@ MockLayers(scenario, { demoTargetDir: "./my-project" })
 The mock client is ideal for unit and integration tests:
 
 ```typescript
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "@rstest/core";
 import { simpleTextScenario, MockLayers } from "../mock/mock-llm.js";
 
 describe("MyAgent", () => {
   it("handles simple queries", async () => {
     const scenario = simpleTextScenario("Test response");
     const layers = Layer.mergeAll(MockLayers(scenario), EventLogSilent);
-    
+
     const agent = await Effect.runPromise(
-      buildAgent().pipe(Effect.provide(layers))
+      buildAgent().pipe(Effect.provide(layers)),
     );
-    
+
     const result = await agent.generateLegacy("Test question");
     expect(result.text).toBe("Test response");
   });

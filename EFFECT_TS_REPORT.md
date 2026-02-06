@@ -190,15 +190,53 @@ const readRequiredEnv = (key: string) =>
   );
 ```
 
+### 1.5 Effect.fn - Traced Functions
+
+`Effect.fn` creates a function that automatically wraps its body in a tracing span. This enables observability without manual `Effect.withSpan` calls:
+
+```typescript
+const readFileEffect = Effect.fn("readFile")(function* (
+  rootAbs: string,
+  relPath: string,
+  maxBytes: number,
+) {
+  const resolved = yield* resolveInsideRoot("readFile", rootAbs, relPath);
+  yield* ensureRealpathInsideRoot(
+    "readFile",
+    rootAbs,
+    resolved.abs,
+    resolved.rel,
+  );
+  const file = yield* safeReadTextFile("readFile", resolved.abs, maxBytes);
+  return {
+    root: rootAbs,
+    path: resolved.rel,
+    content: file.content,
+    truncated: file.truncated,
+  };
+});
+```
+
+Key points:
+
+- The span name (`"readFile"`) appears in traces and is used for filtering/grouping
+- The generator function receives arguments and uses `yield*` just like `Effect.gen`
+- Unlike `Effect.gen`, `Effect.fn` returns a _function_ (not an Effect), so it's called as `readFileEffect(root, path, max)`
+- Do NOT annotate the generator's return type — let TypeScript infer it
+
+Used in this codebase for: `resolveInsideRoot`, `readFileEffect`, `searchTextEffect`.
+
 ---
 
 ## 2. Dependency Injection (Context + Layer)
 
-### 2.1 Service Definition Pattern
+### 2.1 Service Definition Patterns
 
-Effect-TS uses a three-part pattern for defining services:
+This codebase uses two patterns depending on the service type:
 
-**Step 1: Define the service interface type**
+**Pattern A: `Context.GenericTag` (plain config data)**
+
+For services that are just data (no Effect-returning methods):
 
 ```typescript
 // src/config.ts
@@ -210,29 +248,51 @@ export type AppConfig = {
   demoTargetDir: string;
   demoQuestion: string | undefined;
 };
-```
 
-**Step 2: Create a Context tag**
-
-```typescript
 export const AppConfig = Context.GenericTag<AppConfig>("AppConfig");
+export const AppConfigLive = Layer.effect(AppConfig, readAppConfig);
 ```
 
-The tag serves as both a type-level identifier and a runtime key for the service.
+**Pattern B: `Effect.Service` (behavioral services)**
 
-**Step 3: Create a Layer implementation**
+For services with Effect-returning methods, `Effect.Service` combines the tag, type, and default layer in a single class definition:
 
 ```typescript
-export const AppConfigLive = Layer.effect(AppConfig, readAppConfig);
+// src/tools.ts
+export class EventLog extends Effect.Service<EventLog>()("EventLog", {
+  accessors: true,
+  succeed: {
+    emit: (event: ToolEvent) => Effect.log("tool event", { event }),
+  },
+}) {}
+
+export const EventLogLive = EventLog.Default;
+```
+
+Key benefits of `Effect.Service`:
+
+- **Single definition site**: tag + type + default implementation in one class
+- **`accessors: true`**: generates static methods (e.g. `EventLog.emit(...)`) for direct use without `yield*`
+- **`.make()`**: creates instances for test doubles: `EventLog.make({ emit: () => Effect.void })`
+- **`.Default`**: the default Layer, ready to provide
+
+For services built dynamically (depending on other services), use the `effect:` option:
+
+```typescript
+// src/openrouter.ts
+export class OpenRouterClient extends Effect.Service<OpenRouterClient>()(
+  "OpenRouterClient",
+  { effect: buildOpenRouterClient },
+) {}
 ```
 
 ### 2.2 Services in This Codebase
 
-| Service            | File                    | Tag Definition                                             | Layer Type             |
-| ------------------ | ----------------------- | ---------------------------------------------------------- | ---------------------- |
-| `AppConfig`        | `src/config.ts:19`      | `Context.GenericTag<AppConfig>("AppConfig")`               | `Layer.effect` (async) |
-| `OpenRouterClient` | `src/openrouter.ts:104` | `Context.GenericTag<OpenRouterClient>("OpenRouterClient")` | `Layer.effect` (async) |
-| `EventLog`         | `src/tools.ts:31`       | `Context.GenericTag<EventLog>("EventLog")`                 | `Layer.succeed` (sync) |
+| Service            | File                | Pattern              | Layer Type                              |
+| ------------------ | ------------------- | -------------------- | --------------------------------------- |
+| `AppConfig`        | `src/config.ts`     | `Context.GenericTag` | `Layer.effect` (async)                  |
+| `OpenRouterClient` | `src/openrouter.ts` | `Effect.Service`     | `effect:` (async, depends on AppConfig) |
+| `EventLog`         | `src/tools.ts`      | `Effect.Service`     | `succeed:` (sync)                       |
 
 **Diagram: Layered DI (Context + Layer)**
 
@@ -252,71 +312,70 @@ Dependencies ("requires"):
 
 ### 2.3 OpenRouterClient Service
 
-From `src/openrouter.ts`:
+From `src/openrouter.ts` — uses `Effect.Service` with the `effect:` option for dynamic construction:
 
 ```typescript
-// Service interface
-export type OpenRouterClient = {
-  chatCompletions: (
-    body: OpenRouterChatCompletionRequest,
-  ) => Effect.Effect<
-    OpenRouterResponse<OpenRouterChatCompletionResponse>,
-    OpenRouterError
-  >;
-};
+// Build function (depends on AppConfig via yield*)
+const buildOpenRouterClient = Effect.gen(function* () {
+  const cfg = yield* AppConfig;
+  const url = `${cfg.baseUrl}/chat/completions`;
 
-// Context tag
-export const OpenRouterClient =
-  Context.GenericTag<OpenRouterClient>("OpenRouterClient");
+  const request = (body: OpenRouterChatCompletionRequest) =>
+    Effect.tryPromise({
+      /* ... */
+    });
 
-// Layer implementation (depends on AppConfig)
-export const OpenRouterClientLive = Layer.effect(
-  OpenRouterClient,
-  Effect.gen(function* () {
-    const cfg = yield* AppConfig; // Access dependency
-    const url = `${cfg.baseUrl}/chat/completions`;
+  const schedule = retrySchedule<OpenRouterError>({
+    /* ... */
+  });
 
-    const request = (body: OpenRouterChatCompletionRequest) =>
-      Effect.tryPromise({
-        /* ... */
-      });
+  return {
+    chatCompletions: (body: OpenRouterChatCompletionRequest) =>
+      request(body).pipe(Effect.retry(schedule)),
+  };
+});
 
-    const retrySchedule = Schedule.intersect(/* ... */);
+// Service class — tag, type, and default layer in one
+export class OpenRouterClient extends Effect.Service<OpenRouterClient>()(
+  "OpenRouterClient",
+  { effect: buildOpenRouterClient },
+) {}
 
-    return {
-      chatCompletions: (body) =>
-        request(body).pipe(Effect.retry(retrySchedule)),
-    } satisfies OpenRouterClient;
-  }),
-);
+export const OpenRouterClientLive = OpenRouterClient.Default;
+```
+
+Test doubles use `OpenRouterClient.make(...)`:
+
+```typescript
+const fakeClient = OpenRouterClient.make({
+  chatCompletions: (body) =>
+    Effect.sync(() => ({ body: mockResp, headers: {} })),
+});
+Layer.succeed(OpenRouterClient, fakeClient);
 ```
 
 ### 2.4 EventLog Service
 
-From `src/tools.ts`:
+From `src/tools.ts` — uses `Effect.Service` with `accessors: true` and `Effect.log`:
 
 ```typescript
-// Service interface
-export type EventLog = {
-  emit: (event: ToolEvent) => Effect.Effect<void>;
-};
+export class EventLog extends Effect.Service<EventLog>()("EventLog", {
+  accessors: true,
+  succeed: {
+    emit: (event: ToolEvent) => Effect.log("tool event", { event }),
+  },
+}) {}
 
-// Context tag
-export const EventLog = Context.GenericTag<EventLog>("EventLog");
-
-// Live layer with JSONL logging
-export const EventLogLive = Layer.succeed(EventLog, {
-  emit: (event) =>
-    Effect.sync(() => {
-      console.log(JSON.stringify({ ts: new Date().toISOString(), ...event }));
-    }),
-} satisfies EventLog);
+export const EventLogLive = EventLog.Default;
 
 // Silent layer for testing
-export const EventLogSilent = Layer.succeed(EventLog, {
-  emit: () => Effect.void,
-} satisfies EventLog);
+export const EventLogSilent = Layer.succeed(
+  EventLog,
+  EventLog.make({ emit: () => Effect.void }),
+);
 ```
+
+The default implementation uses `Effect.log` (integrated with Effect's runtime log level and span context) instead of `console.log`. Test doubles use `EventLog.make(...)` to satisfy the `_tag` property required by `Effect.Service` classes.
 
 ### 2.5 Accessing Services
 
@@ -365,7 +424,7 @@ const ConfigLayer = USE_MOCK
   ? Layer.succeed(AppConfig, mockConfig)
   : AppConfigLive;
 const ClientLayer = USE_MOCK
-  ? Layer.succeed(OpenRouterClient, createSmartMockClient())
+  ? Layer.succeed(OpenRouterClient, createSmartMockClient()) // createSmartMockClient returns OpenRouterClient.make(...)
   : OpenRouterClientLive;
 
 const LiveLayers = Layer.mergeAll(
@@ -1107,25 +1166,28 @@ const TestConfigLive = (overrides: Partial<AppConfigType> = {}) =>
   } satisfies AppConfigType);
 ```
 
-From `test/integration_fake_llm.test.ts`:
+From `test/integration_fake_llm.test.ts` — note `OpenRouterClient.make(...)` and `EventLog.make(...)` for test doubles:
 
 ```typescript
 const LiveLayers = [
   Layer.succeed(AppConfig, cfg),
   Layer.succeed(OpenRouterClient, fakeClient),
-  Layer.succeed(EventLog, {
-    emit: (event) => Effect.sync(() => void events.push(event)),
-  }),
+  Layer.succeed(
+    EventLog,
+    EventLog.make({
+      emit: (event) => Effect.sync(() => void events.push(event)),
+    }),
+  ),
 ] as const;
 ```
 
 ### 6.2 Fake LLM Implementation
 
-Create deterministic fake clients using `Effect.sync`:
+Create deterministic fake clients using `Effect.sync` and `OpenRouterClient.make(...)`:
 
 ```typescript
 let calls = 0;
-const fakeClient: OpenRouterClientType = {
+const fakeClient = OpenRouterClient.make({
   chatCompletions: (body: OpenRouterChatCompletionRequest) =>
     Effect.sync(() => {
       calls++;
@@ -1176,7 +1238,7 @@ const fakeClient: OpenRouterClientType = {
         headers: {},
       };
     }),
-};
+});
 ```
 
 ### 6.3 Error Testing with Exit
@@ -1294,9 +1356,12 @@ it("executes one tool call then finishes", async () => {
   const LiveLayers = [
     Layer.succeed(AppConfig, cfg),
     Layer.succeed(OpenRouterClient, fakeClient),
-    Layer.succeed(EventLog, {
-      emit: (event) => Effect.sync(() => void events.push(event)),
-    }),
+    Layer.succeed(
+      EventLog,
+      EventLog.make({
+        emit: (event) => Effect.sync(() => void events.push(event)),
+      }),
+    ),
   ] as const;
 
   const agent = await Effect.runPromise(
@@ -1321,11 +1386,12 @@ it("executes one tool call then finishes", async () => {
 
 This codebase demonstrates a comprehensive integration of Effect-TS with Mastra AI:
 
-1. **Core Effect patterns**: `Effect.gen`, `Effect.pipe`, and constructors for building composable programs
-2. **Dependency injection**: Context tags and Layers for clean service separation
+1. **Core Effect patterns**: `Effect.gen`, `Effect.fn`, `Effect.pipe`, and constructors for building composable programs
+2. **Dependency injection**: `Effect.Service` (behavioral services) and `Context.GenericTag` (config data), composed via Layers
 3. **Typed errors**: `Data.TaggedError` for discriminated union error types
 4. **Async patterns**: `Effect.tryPromise`, retry schedules, and timeouts
 5. **Bridge pattern**: `runOrThrow` for integrating with Promise-based APIs
-6. **Testing**: Layer-based test doubles and `Effect.runPromiseExit` for error assertions
+6. **Observability**: `Effect.fn` for automatic tracing spans, `Effect.log` for structured logging
+7. **Testing**: Layer-based test doubles via `Service.make(...)` and `Effect.runPromiseExit` for error assertions
 
 The architecture achieves type safety, testability, and composability while integrating with Mastra's Promise-based agent framework.

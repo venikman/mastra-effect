@@ -6,11 +6,13 @@
  */
 import pino from "pino";
 import { Effect } from "effect";
-import type {
-  OpenRouterChatCompletionRequest,
-  OpenRouterChatCompletionResponse,
-  OpenRouterClient as OpenRouterClientType,
+import {
+  OpenRouterClient,
+  type OpenRouterChatCompletionRequest,
+  type OpenRouterChatCompletionResponse,
 } from "../src/openrouter.js";
+
+type OpenRouterClientType = OpenRouterClient;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -204,7 +206,7 @@ export const createSmartMockClient = (opts?: {
 }): OpenRouterClientType => {
   const conversationStates = new Map<string, { toolsCalledCount: number }>();
 
-  return {
+  return OpenRouterClient.make({
     chatCompletions: (body: OpenRouterChatCompletionRequest) =>
       Effect.gen(function* () {
         yield* Effect.sleep(50);
@@ -258,5 +260,5 @@ export const createSmartMockClient = (opts?: {
         conversationStates.delete(convKey);
         return buildTextResponse(makeAnswer(generateSmartAnswer(userContent)));
       }),
-  };
+  });
 };

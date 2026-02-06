@@ -10,9 +10,10 @@ import {
 } from "../src/mastra.js";
 import {
   OpenRouterClient,
-  type OpenRouterClient as OpenRouterClientType,
   type OpenRouterChatCompletionRequest,
 } from "../src/openrouter.js";
+
+type OpenRouterClientType = OpenRouterClient;
 import { EventLog, makeRepoTools, type ToolEvent } from "../src/tools.js";
 
 const makeTempDir = async (): Promise<string> => {
@@ -28,7 +29,7 @@ describe("integration (fake LLM)", () => {
     const events: ToolEvent[] = [];
 
     let calls = 0;
-    const fakeClient: OpenRouterClientType = {
+    const fakeClient: OpenRouterClientType = OpenRouterClient.make({
       chatCompletions: (body: OpenRouterChatCompletionRequest) =>
         Effect.sync(() => {
           calls++;
@@ -79,7 +80,7 @@ describe("integration (fake LLM)", () => {
             headers: {},
           };
         }),
-    };
+    });
 
     const cfg: AppConfigType = {
       grokKey: "k",
@@ -93,9 +94,12 @@ describe("integration (fake LLM)", () => {
     const LiveLayers = [
       Layer.succeed(AppConfig, cfg),
       Layer.succeed(OpenRouterClient, fakeClient),
-      Layer.succeed(EventLog, {
-        emit: (event) => Effect.sync(() => void events.push(event)),
-      }),
+      Layer.succeed(
+        EventLog,
+        EventLog.make({
+          emit: (event) => Effect.sync(() => void events.push(event)),
+        }),
+      ),
     ] as const;
 
     const agent = await Effect.runPromise(

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import fg from "fast-glob";
-import { Context, Data, Effect, Layer } from "effect";
+import { Data, Effect, Layer } from "effect";
 import { runOrThrow } from "./effect-utils.js";
 
 export type JsonSchema = {
@@ -35,22 +35,19 @@ export type ToolEvent =
     }
   | { type: "tool:error"; tool: string; durationMs: number; error: unknown };
 
-export type EventLog = {
-  emit: (event: ToolEvent) => Effect.Effect<void>;
-};
+export class EventLog extends Effect.Service<EventLog>()("EventLog", {
+  accessors: true,
+  succeed: {
+    emit: (event: ToolEvent) => Effect.log("tool event", { event }),
+  },
+}) {}
 
-export const EventLog = Context.GenericTag<EventLog>("EventLog");
+export const EventLogLive = EventLog.Default;
 
-export const EventLogLive = Layer.succeed(EventLog, {
-  emit: (event) =>
-    Effect.sync(() => {
-      console.log(JSON.stringify({ ts: new Date().toISOString(), ...event }));
-    }),
-} satisfies EventLog);
-
-export const EventLogSilent = Layer.succeed(EventLog, {
-  emit: () => Effect.void,
-} satisfies EventLog);
+export const EventLogSilent = Layer.succeed(
+  EventLog,
+  EventLog.make({ emit: () => Effect.void }),
+);
 
 export class ToolDeniedError extends Data.TaggedError("ToolDeniedError")<{
   tool: string;
@@ -100,45 +97,44 @@ const isDeniedRelPath = (rel: string): { denied: boolean; reason?: string } => {
   return { denied: false };
 };
 
-const resolveInsideRoot = (
+const resolveInsideRoot = Effect.fn("resolveInsideRoot")(function* (
   tool: string,
   rootAbs: string,
   userPath: string,
-): Effect.Effect<{ abs: string; rel: string }, ToolDeniedError> =>
-  Effect.gen(function* () {
-    const abs = Path.resolve(rootAbs, userPath);
-    const rel = Path.relative(rootAbs, abs);
+) {
+  const abs = Path.resolve(rootAbs, userPath);
+  const rel = Path.relative(rootAbs, abs);
 
-    const escaped =
-      rel === "" || rel === "."
-        ? false
-        : rel.startsWith("..") ||
-          rel.split(Path.sep).includes("..") ||
-          Path.isAbsolute(rel);
+  const escaped =
+    rel === "" || rel === "."
+      ? false
+      : rel.startsWith("..") ||
+        rel.split(Path.sep).includes("..") ||
+        Path.isAbsolute(rel);
 
-    if (escaped) {
-      return yield* Effect.fail(
-        new ToolDeniedError({
-          tool,
-          path: userPath,
-          reason: "Path escapes target root",
-        }),
-      );
-    }
+  if (escaped) {
+    return yield* Effect.fail(
+      new ToolDeniedError({
+        tool,
+        path: userPath,
+        reason: "Path escapes target root",
+      }),
+    );
+  }
 
-    const denied = isDeniedRelPath(rel);
-    if (denied.denied) {
-      return yield* Effect.fail(
-        new ToolDeniedError({
-          tool,
-          path: rel,
-          reason: denied.reason ?? "Denied",
-        }),
-      );
-    }
+  const denied = isDeniedRelPath(rel);
+  if (denied.denied) {
+    return yield* Effect.fail(
+      new ToolDeniedError({
+        tool,
+        path: rel,
+        reason: denied.reason ?? "Denied",
+      }),
+    );
+  }
 
-    return { abs, rel };
-  });
+  return { abs, rel };
+});
 
 const safeReadTextFile = (
   tool: string,
@@ -252,48 +248,54 @@ const listFilesEffect = (rootAbs: string, maxFiles: number) =>
       }),
   });
 
-const readFileEffect = (rootAbs: string, relPath: string, maxBytes: number) =>
-  Effect.gen(function* () {
-    const resolved = yield* resolveInsideRoot("readFile", rootAbs, relPath);
-    yield* ensureRealpathInsideRoot(
-      "readFile",
-      rootAbs,
-      resolved.abs,
-      resolved.rel,
-    );
-    const file = yield* safeReadTextFile("readFile", resolved.abs, maxBytes);
-    return {
-      root: rootAbs,
-      path: resolved.rel,
-      content: file.content,
-      truncated: file.truncated,
-    };
-  });
+const readFileEffect = Effect.fn("readFile")(function* (
+  rootAbs: string,
+  relPath: string,
+  maxBytes: number,
+) {
+  const resolved = yield* resolveInsideRoot("readFile", rootAbs, relPath);
+  yield* ensureRealpathInsideRoot(
+    "readFile",
+    rootAbs,
+    resolved.abs,
+    resolved.rel,
+  );
+  const file = yield* safeReadTextFile("readFile", resolved.abs, maxBytes);
+  return {
+    root: rootAbs,
+    path: resolved.rel,
+    content: file.content,
+    truncated: file.truncated,
+  };
+});
 
-const searchTextEffect = (rootAbs: string, query: string, maxMatches: number) =>
-  Effect.gen(function* () {
-    const listed = yield* listFilesEffect(rootAbs, DEFAULT_MAX_FILES);
-    const matches: Array<{ path: string; line: number; preview: string }> = [];
+const searchTextEffect = Effect.fn("searchText")(function* (
+  rootAbs: string,
+  query: string,
+  maxMatches: number,
+) {
+  const listed = yield* listFilesEffect(rootAbs, DEFAULT_MAX_FILES);
+  const matches: Array<{ path: string; line: number; preview: string }> = [];
 
-    for (const rel of listed.files) {
+  for (const rel of listed.files) {
+    if (matches.length >= maxMatches) break;
+    if (/\.(png|jpg|jpeg|gif|webp|ico|zip|gz|tgz|jar|pdf|woff2?)$/i.test(rel))
+      continue;
+
+    const resolved = yield* resolveInsideRoot("searchText", rootAbs, rel);
+    const file = yield* safeReadTextFile("searchText", resolved.abs, 200_000);
+
+    const lines = file.content.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
       if (matches.length >= maxMatches) break;
-      if (/\.(png|jpg|jpeg|gif|webp|ico|zip|gz|tgz|jar|pdf|woff2?)$/i.test(rel))
-        continue;
-
-      const resolved = yield* resolveInsideRoot("searchText", rootAbs, rel);
-      const file = yield* safeReadTextFile("searchText", resolved.abs, 200_000);
-
-      const lines = file.content.split(/\r?\n/);
-      for (let i = 0; i < lines.length; i++) {
-        if (matches.length >= maxMatches) break;
-        const line = lines[i] ?? "";
-        if (!line.includes(query)) continue;
-        matches.push({ path: rel, line: i + 1, preview: line.slice(0, 200) });
-      }
+      const line = lines[i] ?? "";
+      if (!line.includes(query)) continue;
+      matches.push({ path: rel, line: i + 1, preview: line.slice(0, 200) });
     }
+  }
 
-    return { root: rootAbs, query, matches };
-  });
+  return { root: rootAbs, query, matches };
+});
 
 const withToolLogging = <A, E>(
   log: EventLog,

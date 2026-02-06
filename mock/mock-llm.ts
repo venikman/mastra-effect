@@ -164,7 +164,7 @@ export const createMockClient = (
 ): OpenRouterClientType => {
   let callIndex = 0;
 
-  return {
+  return OpenRouterClient.make({
     chatCompletions: (body: OpenRouterChatCompletionRequest) =>
       Effect.gen(function* () {
         // Apply optional delay
@@ -206,7 +206,7 @@ export const createMockClient = (
           },
         } satisfies OpenRouterResponse<OpenRouterChatCompletionResponse>;
       }),
-  };
+  });
 };
 
 const buildResponse = (

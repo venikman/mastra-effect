@@ -1,7 +1,14 @@
+/**
+ * Sandboxed file-system tools for LLM agents.
+ *
+ * Provides three tools — listFiles, readFile, searchText — that an LLM can
+ * call to explore a repository. All paths are confined to a root directory;
+ * sensitive files (.env, keys, node_modules) are blocked by a deny list.
+ */
 import { createHash } from "node:crypto";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
-import fg from "fast-glob";
+
 import { Data, Effect, Layer } from "effect";
 import { runOrThrow } from "./effect-utils.js";
 
@@ -49,6 +56,9 @@ export const EventLogSilent = Layer.succeed(
   EventLog.make({ emit: () => Effect.void }),
 );
 
+// Effect's Data.TaggedError gives us typed, pattern-matchable errors for free.
+// Each class below carries a discriminant `_tag` so callers can match on it:
+//   if (error._tag === "ToolDeniedError") { /* handle denied */ }
 export class ToolDeniedError extends Data.TaggedError("ToolDeniedError")<{
   tool: string;
   path: string;
@@ -74,6 +84,8 @@ const DEFAULT_MAX_MATCHES = 50;
 const sha256 = (input: string): string =>
   createHash("sha256").update(input).digest("hex").slice(0, 16);
 
+// Returns { denied, reason } instead of throwing so callers can decide how to
+// handle denied paths — some log a warning, others fail the whole operation.
 const isDeniedRelPath = (rel: string): { denied: boolean; reason?: string } => {
   const normalized = rel.split(Path.sep).join("/");
   const segments = normalized.split("/").filter(Boolean);
@@ -210,43 +222,53 @@ const ensureRealpathInsideRoot = (
     },
   });
 
-/** List files using fast-glob, filtering through the deny list. */
-const listFilesEffect = (rootAbs: string, maxFiles: number) =>
+const SKIP_DIRS = new Set(["node_modules", ".git", "output"]);
+
+/** Recursively walk `dir`, skipping SKIP_DIRS and symlinks. */
+const walkDir = (
+  rootAbs: string,
+  dir: string,
+): Effect.Effect<string[], ToolFsError> =>
   Effect.tryPromise({
     try: async () => {
-      const all = await fg("**/*", {
-        cwd: rootAbs,
-        dot: true,
-        onlyFiles: true,
-        followSymbolicLinks: false,
-        ignore: ["**/node_modules/**", "**/.git/**", "**/output/**"],
-      });
-
-      const candidates = all.filter((rel) => !isDeniedRelPath(rel).denied);
-      const nonSymlinks = (
-        await Promise.all(
-          candidates.map(async (rel) => {
-            try {
-              const st = await Fs.lstat(Path.join(rootAbs, rel));
-              return st.isSymbolicLink() ? null : rel;
-            } catch {
-              return null;
-            }
-          }),
-        )
-      ).filter((rel): rel is string => typeof rel === "string");
-
-      const files = nonSymlinks.sort().slice(0, maxFiles);
-      return { root: rootAbs, files };
+      const entries = await Fs.readdir(dir, { withFileTypes: true });
+      const files: string[] = [];
+      for (const entry of entries) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        if (entry.isSymbolicLink()) continue;
+        const full = Path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          // Effect.runPromise is safe here — walkDir's only error is ToolFsError
+          // which we let bubble up through the outer tryPromise catch.
+          const sub = await Effect.runPromise(walkDir(rootAbs, full));
+          files.push(...sub);
+        } else if (entry.isFile()) {
+          files.push(Path.relative(rootAbs, full));
+        }
+      }
+      return files;
     },
     catch: (cause) =>
       new ToolFsError({
         tool: "listFiles",
         message:
-          cause instanceof Error ? cause.message : "Failed to list files",
+          cause instanceof Error ? cause.message : "Failed to walk directory",
         cause,
       }),
   });
+
+/** List files under rootAbs, filtering through the deny list. */
+const listFilesEffect = Effect.fn("listFiles")(function* (
+  rootAbs: string,
+  maxFiles: number,
+) {
+  const all = yield* walkDir(rootAbs, rootAbs);
+  const files = all
+    .filter((rel) => !isDeniedRelPath(rel).denied)
+    .sort()
+    .slice(0, maxFiles);
+  return { root: rootAbs, files };
+});
 
 const readFileEffect = Effect.fn("readFile")(function* (
   rootAbs: string,

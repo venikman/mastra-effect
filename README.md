@@ -103,13 +103,33 @@ npm run demo:debate
 
 ## Code Map
 
-- `src/config.ts` - env parsing + typed config errors (Effect)
-- `src/openrouter.ts` - OpenRouter client with retries + timeout (Effect)
-- `src/tools.ts` - repo tools + JSONL tool event log (Effect)
-- `src/mastra.ts` - Mastra legacy model adapter + agent factories
-- `src/mastra/index.ts` - `mastra dev` entrypoint (builds agents; supports mock mode)
-- `mock/standalone-server.ts` - standalone mock Mastra-compatible API server
-- `EFFECT_TS_REPORT.md` - deeper notes on how Effect is used here
+### `src/` — core runtime
+
+| File              | Purpose                                                                    |
+| ----------------- | -------------------------------------------------------------------------- |
+| `config.ts`       | Env parsing via `envalid` + typed `ConfigError` (Effect Layer)             |
+| `openrouter.ts`   | OpenRouter client with retries + timeout (Effect Layer)                    |
+| `http-effect.ts`  | Reusable HTTP primitives: `fetchWithTimeout`, `retrySchedule`, error types |
+| `effect-utils.ts` | Shared Effect helpers (`runOrThrow`)                                       |
+| `tools.ts`        | Repo tools (listFiles, searchText, readFile) + JSONL event log (Effect)    |
+| `mastra.ts`       | LanguageModelV1 adapter + agent factories (repoQa, debater, judge)         |
+| `mastra/index.ts` | `mastra dev` entrypoint — builds agents, supports mock mode                |
+
+### `mock/` — local development without API keys
+
+All mock infrastructure for running demos, Studio, and tests without real LLM calls.
+
+| File                    | Purpose                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `shared.ts`             | Shared response builders, smart answer generation, stateful mock client          |
+| `mock-llm.ts`           | Configurable scenario-based mock client (simpleText, toolThenAnswer, echo, etc.) |
+| `standalone-server.ts`  | Mastra-compatible HTTP API on `:4111` (Hono)                                     |
+| `openai-mock-server.ts` | OpenAI-compatible `/v1/chat/completions` mock (Hono)                             |
+| `example-usage.ts`      | Runnable examples of all mock scenarios                                          |
+
+### Docs
+
+- `EFFECT_TS_REPORT.md` — deeper notes on how Effect-TS is used here
 
 ## Tests (learning)
 

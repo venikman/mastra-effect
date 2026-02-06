@@ -1,5 +1,22 @@
-import { Context, Data, Duration, Effect, Layer, Schedule } from "effect";
+import { Context, Data, Effect, Layer } from "effect";
 import { AppConfig } from "./config.js";
+import {
+  fetchWithTimeout,
+  headersToRecord,
+  retrySchedule,
+  HttpError,
+  NetworkError,
+  ParseError,
+} from "./http-effect.js";
+
+// Re-export error types under their original names for backward compat
+export {
+  HttpError as OpenRouterHttpError,
+  NetworkError as OpenRouterNetworkError,
+  ParseError as OpenRouterParseError,
+};
+
+export type OpenRouterError = NetworkError | HttpError | ParseError;
 
 export type OpenAIChatMessage =
   | { role: "system"; content: string }
@@ -67,29 +84,6 @@ export type OpenRouterChatCompletionResponse = {
   };
 };
 
-export class OpenRouterNetworkError extends Data.TaggedError(
-  "OpenRouterNetworkError",
-)<{
-  message: string;
-  cause?: unknown;
-}> {}
-
-export class OpenRouterHttpError extends Data.TaggedError("OpenRouterHttpError")<{
-  status: number;
-  statusText: string;
-  bodyText: string;
-}> {}
-
-export class OpenRouterParseError extends Data.TaggedError("OpenRouterParseError")<{
-  message: string;
-  bodyText: string;
-}> {}
-
-export type OpenRouterError =
-  | OpenRouterNetworkError
-  | OpenRouterHttpError
-  | OpenRouterParseError;
-
 export type OpenRouterResponse<A> = {
   body: A;
   headers: Record<string, string>;
@@ -98,49 +92,21 @@ export type OpenRouterResponse<A> = {
 export type OpenRouterClient = {
   chatCompletions: (
     body: OpenRouterChatCompletionRequest,
-  ) => Effect.Effect<OpenRouterResponse<OpenRouterChatCompletionResponse>, OpenRouterError>;
+  ) => Effect.Effect<
+    OpenRouterResponse<OpenRouterChatCompletionResponse>,
+    OpenRouterError
+  >;
 };
 
-export const OpenRouterClient = Context.GenericTag<OpenRouterClient>("OpenRouterClient");
+export const OpenRouterClient =
+  Context.GenericTag<OpenRouterClient>("OpenRouterClient");
 
 const isRetriableStatus = (status: number): boolean =>
-  status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
-
-const withTimeout = async (
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> => {
-  const controller = new AbortController();
-  const existingSignal = init.signal;
-
-  const abortFromUpstream = () => controller.abort(existingSignal?.reason);
-  if (existingSignal) {
-    if (existingSignal.aborted) {
-      abortFromUpstream();
-    } else {
-      existingSignal.addEventListener("abort", abortFromUpstream, { once: true });
-    }
-  }
-
-  const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
-    if (existingSignal) {
-      existingSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-};
-
-const headersToRecord = (headers: Headers): Record<string, string> => {
-  const out: Record<string, string> = {};
-  headers.forEach((value, key) => {
-    out[key] = value;
-  });
-  return out;
-};
+  status === 408 ||
+  status === 409 ||
+  status === 425 ||
+  status === 429 ||
+  status >= 500;
 
 const MAX_RETRIES = 3;
 const TIMEOUT_MS = 60_000;
@@ -153,10 +119,13 @@ export const OpenRouterClientLive = Layer.effect(
 
     const request = (
       body: OpenRouterChatCompletionRequest,
-    ): Effect.Effect<OpenRouterResponse<OpenRouterChatCompletionResponse>, OpenRouterError> =>
+    ): Effect.Effect<
+      OpenRouterResponse<OpenRouterChatCompletionResponse>,
+      OpenRouterError
+    > =>
       Effect.tryPromise({
         try: async () => {
-          const resp = await withTimeout(
+          const resp = await fetchWithTimeout(
             url,
             {
               method: "POST",
@@ -173,7 +142,7 @@ export const OpenRouterClientLive = Layer.effect(
           const bodyText = await resp.text();
 
           if (!resp.ok) {
-            throw new OpenRouterHttpError({
+            throw new HttpError({
               status: resp.status,
               statusText: resp.statusText,
               bodyText,
@@ -183,8 +152,8 @@ export const OpenRouterClientLive = Layer.effect(
           let parsed: unknown;
           try {
             parsed = bodyText.length === 0 ? {} : JSON.parse(bodyText);
-          } catch (e) {
-            throw new OpenRouterParseError({
+          } catch {
+            throw new ParseError({
               message: "Failed to parse JSON response",
               bodyText,
             });
@@ -197,44 +166,33 @@ export const OpenRouterClientLive = Layer.effect(
         },
         catch: (e) => {
           if (
-            e instanceof OpenRouterHttpError ||
-            e instanceof OpenRouterParseError ||
-            e instanceof OpenRouterNetworkError
-          ) {
+            e instanceof HttpError ||
+            e instanceof ParseError ||
+            e instanceof NetworkError
+          )
             return e;
-          }
-
-          if (e instanceof OpenRouterHttpError) {
-            return e;
-          }
-
-          if (e instanceof Error && (e as any).name === "AbortError") {
-            return new OpenRouterNetworkError({ message: "Request aborted", cause: e });
-          }
-
-          if (e instanceof OpenRouterHttpError) return e;
-          return new OpenRouterNetworkError({
+          if (e instanceof Error && (e as any).name === "AbortError")
+            return new NetworkError({ message: "Request aborted", cause: e });
+          return new NetworkError({
             message: e instanceof Error ? e.message : "Network error",
             cause: e,
           });
         },
       });
 
-    const retrySchedule = Schedule.intersect(
-      Schedule.exponential(Duration.millis(200)),
-      Schedule.recurs(MAX_RETRIES - 1),
-    ).pipe(
-      Schedule.whileInput((err: OpenRouterError) => {
-        if (err instanceof OpenRouterNetworkError) return true;
-        if (err instanceof OpenRouterParseError) return false;
-        if (err instanceof OpenRouterHttpError) return isRetriableStatus(err.status);
+    const schedule = retrySchedule<OpenRouterError>({
+      baseMs: 200,
+      maxRetries: MAX_RETRIES,
+      shouldRetry: (err) => {
+        if (err instanceof NetworkError) return true;
+        if (err instanceof ParseError) return false;
+        if (err instanceof HttpError) return isRetriableStatus(err.status);
         return false;
-      }),
-    );
+      },
+    });
 
     return {
-      chatCompletions: (body) => request(body).pipe(Effect.retry(retrySchedule)),
+      chatCompletions: (body) => request(body).pipe(Effect.retry(schedule)),
     } satisfies OpenRouterClient;
   }),
 );
-

@@ -6,7 +6,7 @@ import type {
   LanguageModelV1CallOptions,
   LanguageModelV1StreamPart,
 } from "@mastra/core/_types/@internal_ai-sdk-v4/dist";
-import { Cause, Data, Effect, Option } from "effect";
+import { Cause, Data, Effect, Option, Schema } from "effect";
 import { AppConfig } from "./config.js";
 import {
   OpenRouterClient,
@@ -26,33 +26,29 @@ const runOrThrow = async <A, E>(eff: Effect.Effect<A, E>): Promise<A> => {
   const exit = await Effect.runPromiseExit(eff);
   if (exit._tag === "Failure") {
     const err = Cause.failureOption(exit.cause);
-    if (Option.isSome(err)) {
-      throw err.value;
-    }
+    if (Option.isSome(err)) throw err.value;
     throw exit.cause;
   }
   return exit.value;
 };
 
-const isTextPart = (part: unknown): part is { type: "text"; text: string } =>
-  typeof part === "object" &&
-  part !== null &&
-  (part as any).type === "text" &&
-  typeof (part as any).text === "string";
+// ─── Schema-based type guards (replaces hand-rolled isTextPart / isToolCallPart) ─
 
-const isToolCallPart = (
-  part: unknown,
-): part is {
-  type: "tool-call";
-  toolCallId: string;
-  toolName: string;
-  args: unknown;
-} =>
-  typeof part === "object" &&
-  part !== null &&
-  (part as any).type === "tool-call" &&
-  typeof (part as any).toolCallId === "string" &&
-  typeof (part as any).toolName === "string";
+const TextPart = Schema.Struct({
+  type: Schema.Literal("text"),
+  text: Schema.String,
+});
+const isTextPart = Schema.is(TextPart);
+
+const ToolCallPart = Schema.Struct({
+  type: Schema.Literal("tool-call"),
+  toolCallId: Schema.String,
+  toolName: Schema.String,
+  args: Schema.Unknown,
+});
+const isToolCallPart = Schema.is(ToolCallPart);
+
+// ─── Prompt / tool conversion ────────────────────────────────────────────────
 
 const promptToOpenAiMessages = (
   prompt: LanguageModelV1CallOptions["prompt"],
@@ -63,7 +59,7 @@ const promptToOpenAiMessages = (
     if (msg.role === "system" || msg.role === "user") {
       const parts =
         typeof msg.content === "string"
-          ? [{ type: "text", text: msg.content }]
+          ? [{ type: "text" as const, text: msg.content }]
           : msg.content;
       const content = parts
         .filter(isTextPart)
@@ -76,7 +72,7 @@ const promptToOpenAiMessages = (
     if (msg.role === "assistant") {
       const parts =
         typeof msg.content === "string"
-          ? [{ type: "text", text: msg.content }]
+          ? [{ type: "text" as const, text: msg.content }]
           : msg.content;
       const content = parts
         .filter(isTextPart)
@@ -182,6 +178,8 @@ const getFirstChoice = (resp: OpenRouterChatCompletionResponse) => {
   return choice;
 };
 
+// ─── Language model adapter ──────────────────────────────────────────────────
+
 export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
   const cfg = yield* AppConfig;
   const client = yield* OpenRouterClient;
@@ -217,14 +215,9 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
 
     if (options.mode.type === "regular") {
       const tools = toolsToOpenAiTools(options.mode.tools);
-      if (tools.length > 0) {
-        requestBody.tools = tools;
-      }
-
+      if (tools.length > 0) requestBody.tools = tools;
       const toolChoice = toolChoiceToOpenAiToolChoice(options.mode.toolChoice);
-      if (toolChoice) {
-        requestBody.tool_choice = toolChoice;
-      }
+      if (toolChoice) requestBody.tool_choice = toolChoice;
     }
 
     const { body: resp, headers } = await runOrThrow(
@@ -257,13 +250,8 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
             : {}),
         },
       },
-      rawResponse: {
-        headers,
-        body: resp,
-      },
-      request: {
-        body: JSON.stringify(requestBody),
-      },
+      rawResponse: { headers, body: resp },
+      request: { body: JSON.stringify(requestBody) },
       response: {
         modelId: cfg.grokModel,
         ...(resp.id ? { id: resp.id } : {}),
@@ -290,13 +278,11 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
               textDelta: generated.text,
             });
           }
-
           if (generated.toolCalls) {
             for (const tc of generated.toolCalls) {
               controller.enqueue({ type: "tool-call", ...tc });
             }
           }
-
           controller.enqueue({
             type: "finish",
             finishReason: generated.finishReason as any,
@@ -351,6 +337,8 @@ export const makeOpenRouterLanguageModelV1 = Effect.gen(function* () {
 
   return model;
 });
+
+// ─── Agent factories ─────────────────────────────────────────────────────────
 
 export const makeRepoQaAgent = (opts: {
   model: MastraLegacyLanguageModel;

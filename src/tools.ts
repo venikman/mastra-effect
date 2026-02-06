@@ -1,11 +1,8 @@
 import { createHash } from "node:crypto";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
+import fg from "fast-glob";
 import { Cause, Context, Data, Effect, Layer, Option } from "effect";
-
-// NOTE: We intentionally avoid Zod in this repo code. Mastra tools are represented
-// as plain "function tool" objects with JSON-Schema-like `parameters`, and we do
-// lightweight runtime validation/coercion inside `execute`.
 
 export type JsonSchema = {
   type: "object";
@@ -19,7 +16,6 @@ export type FunctionTool = {
   name: string;
   description: string;
   parameters: JsonSchema;
-  // Mastra passes a context as the second arg; we ignore it in this repo.
   execute: (input: unknown, _context?: unknown) => Promise<unknown>;
 };
 
@@ -29,23 +25,14 @@ const makeTool = (tool: Omit<FunctionTool, "type">): FunctionTool => ({
 });
 
 export type ToolEvent =
-  | {
-      type: "tool:start";
-      tool: string;
-      input: unknown;
-    }
+  | { type: "tool:start"; tool: string; input: unknown }
   | {
       type: "tool:success";
       tool: string;
       durationMs: number;
       outputSummary: unknown;
     }
-  | {
-      type: "tool:error";
-      tool: string;
-      durationMs: number;
-      error: unknown;
-    };
+  | { type: "tool:error"; tool: string; durationMs: number; error: unknown };
 
 export type EventLog = {
   emit: (event: ToolEvent) => Effect.Effect<void>;
@@ -56,7 +43,6 @@ export const EventLog = Context.GenericTag<EventLog>("EventLog");
 export const EventLogLive = Layer.succeed(EventLog, {
   emit: (event) =>
     Effect.sync(() => {
-      // Intentionally JSONL so it's easy to grep/pipe.
       console.log(JSON.stringify({ ts: new Date().toISOString(), ...event }));
     }),
 } satisfies EventLog);
@@ -94,9 +80,7 @@ const runOrThrow = async <A, E>(eff: Effect.Effect<A, E>): Promise<A> => {
   const exit = await Effect.runPromiseExit(eff);
   if (exit._tag === "Failure") {
     const err = Cause.failureOption(exit.cause);
-    if (Option.isSome(err)) {
-      throw err.value;
-    }
+    if (Option.isSome(err)) throw err.value;
     throw exit.cause;
   }
   return exit.value;
@@ -113,7 +97,6 @@ const isDeniedRelPath = (rel: string): { denied: boolean; reason?: string } => {
     return { denied: true, reason: "Reading node_modules is blocked" };
   if (segments.includes("output"))
     return { denied: true, reason: "Reading output is blocked" };
-
   if (base === ".env" || base.startsWith(".env."))
     return { denied: true, reason: "Reading .env is blocked" };
   if (base === "id_rsa" || base.startsWith("id_rsa."))
@@ -186,46 +169,22 @@ const safeReadTextFile = (
       }),
   });
 
-const walkFiles = async (
-  rootAbs: string,
-  maxFiles: number,
-): Promise<string[]> => {
-  const files: string[] = [];
-  const stack = [rootAbs];
-
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    if (!dir) break;
-
-    const entries = await Fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const abs = Path.join(dir, entry.name);
-      const rel = Path.relative(rootAbs, abs);
-
-      const denied = isDeniedRelPath(rel);
-      if (denied.denied) continue;
-
-      if (entry.isDirectory()) {
-        stack.push(abs);
-        continue;
-      }
-
-      if (entry.isFile()) {
-        files.push(rel);
-        if (files.length >= maxFiles) return files.sort();
-      }
-    }
-  }
-
-  return files.sort();
-};
-
+/** List files using fast-glob, filtering through the deny list. */
 const listFilesEffect = (rootAbs: string, maxFiles: number) =>
   Effect.tryPromise({
-    try: async () => ({
-      root: rootAbs,
-      files: await walkFiles(rootAbs, maxFiles),
-    }),
+    try: async () => {
+      const all = await fg("**/*", {
+        cwd: rootAbs,
+        dot: true,
+        onlyFiles: true,
+        ignore: ["**/node_modules/**", "**/.git/**", "**/output/**"],
+      });
+      const filtered = all
+        .filter((rel) => !isDeniedRelPath(rel).denied)
+        .sort()
+        .slice(0, maxFiles);
+      return { root: rootAbs, files: filtered };
+    },
     catch: (cause) =>
       new ToolFsError({
         tool: "listFiles",
@@ -254,13 +213,8 @@ const searchTextEffect = (rootAbs: string, query: string, maxMatches: number) =>
 
     for (const rel of listed.files) {
       if (matches.length >= maxMatches) break;
-
-      // Skip obvious binaries by extension (minimal heuristic)
-      if (
-        /\.(png|jpg|jpeg|gif|webp|ico|zip|gz|tgz|jar|pdf|woff2?)$/i.test(rel)
-      ) {
+      if (/\.(png|jpg|jpeg|gif|webp|ico|zip|gz|tgz|jar|pdf|woff2?)$/i.test(rel))
         continue;
-      }
 
       const resolved = yield* resolveInsideRoot("searchText", rootAbs, rel);
       const file = yield* safeReadTextFile("searchText", resolved.abs, 200_000);
@@ -270,12 +224,7 @@ const searchTextEffect = (rootAbs: string, query: string, maxMatches: number) =>
         if (matches.length >= maxMatches) break;
         const line = lines[i] ?? "";
         if (!line.includes(query)) continue;
-
-        matches.push({
-          path: rel,
-          line: i + 1,
-          preview: line.slice(0, 200),
-        });
+        matches.push({ path: rel, line: i + 1, preview: line.slice(0, 200) });
       }
     }
 
@@ -296,19 +245,22 @@ const withToolLogging = <A, E>(
     const durationMs = (yield* Effect.sync(() => Date.now())) - startedAt;
 
     if (exit._tag === "Failure") {
-      const cause = exit.cause;
-      yield* log.emit({ type: "tool:error", tool, durationMs, error: cause });
-      return yield* Effect.failCause(cause);
+      yield* log.emit({
+        type: "tool:error",
+        tool,
+        durationMs,
+        error: exit.cause,
+      });
+      return yield* Effect.failCause(exit.cause);
     }
 
-    const value = exit.value;
     yield* log.emit({
       type: "tool:success",
       tool,
       durationMs,
-      outputSummary: outputSummary(value),
+      outputSummary: outputSummary(exit.value),
     });
-    return value;
+    return exit.value;
   });
 
 export const makeRepoTools = (rootDir: string) =>
@@ -474,7 +426,5 @@ export const makeRepoTools = (rootDir: string) =>
       },
     });
 
-    // ToolsInput type comes from @mastra/core; we keep runtime compatibility here
-    // while staying Zod-free by providing JSON-schema-like tool parameters.
     return { listFiles, searchText, readFile } as const;
   });

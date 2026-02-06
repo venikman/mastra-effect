@@ -6,8 +6,9 @@ import type {
   LanguageModelV1CallOptions,
   LanguageModelV1StreamPart,
 } from "@mastra/core/_types/@internal_ai-sdk-v4/dist";
-import { Cause, Data, Effect, Option, Schema } from "effect";
+import { Data, Effect, Schema } from "effect";
 import { AppConfig } from "./config.js";
+import { runOrThrow } from "./effect-utils.js";
 import {
   OpenRouterClient,
   type OpenAIChatMessage,
@@ -21,16 +22,6 @@ export class ModelAdapterError extends Data.TaggedError("ModelAdapterError")<{
   message: string;
   cause?: unknown;
 }> {}
-
-const runOrThrow = async <A, E>(eff: Effect.Effect<A, E>): Promise<A> => {
-  const exit = await Effect.runPromiseExit(eff);
-  if (exit._tag === "Failure") {
-    const err = Cause.failureOption(exit.cause);
-    if (Option.isSome(err)) throw err.value;
-    throw exit.cause;
-  }
-  return exit.value;
-};
 
 // ─── Schema-based type guards (replaces hand-rolled isTextPart / isToolCallPart) ─
 

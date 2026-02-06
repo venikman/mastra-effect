@@ -3,7 +3,7 @@
  * Standalone Mock Mastra Server
  *
  * Runs a mock Mastra-compatible API server without real LLM calls.
- * Uses Hono for routing instead of hand-rolled http.createServer().
+ * Uses Hono for routing, shared mock infrastructure for LLM simulation.
  *
  * Run with: npm run dev:mock
  * Then use exactly like the real server at http://localhost:4111
@@ -18,217 +18,15 @@ import {
   makeOpenRouterLanguageModelV1,
   makeRepoQaAgent,
 } from "../src/mastra.js";
-import {
-  OpenRouterClient,
-  type OpenRouterChatCompletionRequest,
-} from "../src/openrouter.js";
+import { OpenRouterClient } from "../src/openrouter.js";
 import { EventLogLive, makeRepoTools } from "../src/tools.js";
-import type { MockToolCall } from "./mock-llm.js";
+import { createSmartMockClient } from "./shared.js";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT ?? "4111", 10);
 const TARGET_DIR = process.env.DEMO_TARGET_DIR?.trim() || ".";
 const MOCK_SCENARIO = process.env.MOCK_SCENARIO ?? "smart";
-
-// ─── Smart Mock LLM Client ──────────────────────────────────────────────────
-
-const createSmartMockClient = (): typeof OpenRouterClient.Type => {
-  const conversationStates = new Map<string, { toolsCalledCount: number }>();
-
-  return {
-    chatCompletions: (body: OpenRouterChatCompletionRequest) =>
-      Effect.gen(function* () {
-        yield* Effect.sleep(50);
-
-        const firstUserMsg = body.messages.find((m) => m.role === "user");
-        const convKey = firstUserMsg?.content?.slice(0, 50) ?? "default";
-
-        if (!conversationStates.has(convKey)) {
-          conversationStates.set(convKey, { toolsCalledCount: 0 });
-        }
-        const state = conversationStates.get(convKey)!;
-
-        const lastUserMsg = [...body.messages]
-          .reverse()
-          .find((m) => m.role === "user");
-        const userContent = lastUserMsg?.content ?? "";
-        const hasToolResults = body.messages.some((m) => m.role === "tool");
-        const availableTools = body.tools?.map((t) => t.function.name) ?? [];
-
-        console.log(
-          `[MockLLM] Conversation: "${convKey.slice(0, 30)}...", Tools called: ${state.toolsCalledCount}`,
-        );
-
-        if (hasToolResults) {
-          state.toolsCalledCount++;
-
-          if (state.toolsCalledCount >= 2) {
-            conversationStates.delete(convKey);
-            return buildTextResponse(generateSmartAnswer(userContent));
-          }
-
-          const nextTool = selectNextTool(body, availableTools);
-          if (nextTool) return buildToolCallResponse([nextTool]);
-
-          conversationStates.delete(convKey);
-          return buildTextResponse(generateSmartAnswer(userContent));
-        }
-
-        if (
-          state.toolsCalledCount === 0 &&
-          availableTools.includes("listFiles")
-        ) {
-          return buildToolCallResponse([
-            { id: "tc1", name: "listFiles", arguments: { max: 50 } },
-          ]);
-        }
-
-        conversationStates.delete(convKey);
-        return buildTextResponse(generateSmartAnswer(userContent));
-      }),
-  };
-};
-
-const selectNextTool = (
-  body: OpenRouterChatCompletionRequest,
-  availableTools: string[],
-): MockToolCall | null => {
-  const calledTools = new Set<string>();
-  for (const msg of body.messages) {
-    if (msg.role === "assistant" && msg.tool_calls) {
-      for (const tc of msg.tool_calls) calledTools.add(tc.function.name);
-    }
-  }
-
-  if (!calledTools.has("searchText") && availableTools.includes("searchText"))
-    return {
-      id: `tc${Date.now()}`,
-      name: "searchText",
-      arguments: { query: "export", maxMatches: 10 },
-    };
-
-  if (!calledTools.has("readFile") && availableTools.includes("readFile"))
-    return {
-      id: `tc${Date.now()}`,
-      name: "readFile",
-      arguments: { path: "package.json" },
-    };
-
-  return null;
-};
-
-const generateSmartAnswer = (userQuery: string): string => {
-  const query = userQuery.toLowerCase();
-
-  if (
-    query.includes("run") ||
-    query.includes("start") ||
-    query.includes("test")
-  ) {
-    return `## How to Run This Project (Mock Response)
-
-Based on my analysis of the repository:
-
-### Quick Start
-\`\`\`bash
-npm install
-npm run dev      # Start development server
-npm test         # Run tests
-\`\`\`
-
-### Available Scripts
-- \`npm run dev\` - Start Mastra development server
-- \`npm run dev:mock\` - Start mock server (no API calls)
-- \`npm run demo:qa\` - Run the Q&A demo
-- \`npm test\` - Run test suite
-
-### Key Files
-- \`src/config.ts\` - Configuration management
-- \`src/mastra.ts\` - Main Mastra integration
-- \`src/tools.ts\` - Tool definitions
-
-*Note: This is a mock response for local development without API calls.*`;
-  }
-
-  if (
-    query.includes("structure") ||
-    query.includes("architecture") ||
-    query.includes("files")
-  ) {
-    return `## Repository Structure (Mock Response)
-
-\`\`\`
-├── src/           # Source code
-│   ├── config.ts  # Configuration
-│   ├── mastra.ts  # Mastra integration
-│   ├── openrouter.ts  # OpenRouter client
-│   └── tools.ts   # Tool definitions
-├── test/          # Test files
-├── demos/         # Demo scripts
-├── mock/          # Mock LLM for local dev
-└── package.json   # Dependencies
-\`\`\`
-
-*Note: This is a mock response for local development without API calls.*`;
-  }
-
-  return `## Analysis (Mock Response)
-
-I've analyzed the repository and here's what I found:
-
-1. This is a TypeScript project using Effect-TS
-2. It integrates with Mastra for AI agent functionality
-3. Uses OpenRouter for LLM access
-
-For more specific information, please ask about:
-- How to run/test the project
-- Repository structure
-- Specific files or features
-
-*Note: This is a mock response for local development without API calls.*`;
-};
-
-const buildTextResponse = (content: string) => ({
-  body: {
-    id: `mock-${Date.now()}`,
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant" as const, content },
-        finish_reason: "stop",
-      },
-    ],
-    usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
-  },
-  headers: { "x-mock": "true" },
-});
-
-const buildToolCallResponse = (toolCalls: MockToolCall[]) => ({
-  body: {
-    id: `mock-${Date.now()}`,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: toolCalls.map((tc) => ({
-            id: tc.id,
-            type: "function" as const,
-            function: {
-              name: tc.name,
-              arguments: JSON.stringify(tc.arguments),
-            },
-          })),
-        },
-        finish_reason: "tool_calls",
-      },
-    ],
-    usage: { prompt_tokens: 50, completion_tokens: 10, total_tokens: 60 },
-  },
-  headers: { "x-mock": "true" },
-});
 
 // ─── Build Agent ─────────────────────────────────────────────────────────────
 

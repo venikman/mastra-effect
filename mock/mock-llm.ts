@@ -14,20 +14,16 @@ import {
   type OpenRouterResponse,
 } from "../src/openrouter.js";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type MockToolCall = {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-};
+import type { MockToolCall } from "./shared.js";
+export type { MockToolCall } from "./shared.js";
 
 export type MockResponse =
   | { type: "text"; content: string }
   | { type: "tool_call"; toolCalls: MockToolCall[] }
-  | { type: "function"; handler: (request: OpenRouterChatCompletionRequest) => MockResponse };
+  | {
+      type: "function";
+      handler: (request: OpenRouterChatCompletionRequest) => MockResponse;
+    };
 
 export type MockScenario = {
   /** Human-readable name for the scenario */
@@ -89,7 +85,9 @@ export const echoScenario: MockScenario = {
     {
       type: "function",
       handler: (req) => {
-        const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
+        const lastUserMsg = [...req.messages]
+          .reverse()
+          .find((m) => m.role === "user");
         const content = lastUserMsg?.content ?? "(no user message found)";
         return { type: "text", content: `Echo: ${content}` };
       },
@@ -113,11 +111,19 @@ export const repoQaDemoScenario: MockScenario = {
     },
     {
       type: "tool_call",
-      toolCalls: [{ id: "tc2", name: "searchText", arguments: { query: "export", maxMatches: 10 } }],
+      toolCalls: [
+        {
+          id: "tc2",
+          name: "searchText",
+          arguments: { query: "export", maxMatches: 10 },
+        },
+      ],
     },
     {
       type: "tool_call",
-      toolCalls: [{ id: "tc3", name: "readFile", arguments: { path: "package.json" } }],
+      toolCalls: [
+        { id: "tc3", name: "readFile", arguments: { path: "package.json" } },
+      ],
     },
     {
       type: "text",
@@ -152,7 +158,9 @@ Based on my exploration of the repository:
 /**
  * Creates a mock OpenRouter client that returns predefined responses.
  */
-export const createMockClient = (scenario: MockScenario): OpenRouterClientType => {
+export const createMockClient = (
+  scenario: MockScenario,
+): OpenRouterClientType => {
   let callIndex = 0;
 
   return {
@@ -173,7 +181,9 @@ export const createMockClient = (scenario: MockScenario): OpenRouterClientType =
 
         // Resolve function-based responses
         const resolved =
-          mockResponse.type === "function" ? mockResponse.handler(body) : mockResponse;
+          mockResponse.type === "function"
+            ? mockResponse.handler(body)
+            : mockResponse;
 
         // Build OpenRouter-compatible response
         const response = buildResponse(resolved, callIndex);
@@ -267,5 +277,8 @@ export const MockConfigLayer = (overrides?: Partial<AppConfigType>) =>
 /**
  * Convenience: Combined mock layers for quick setup.
  */
-export const MockLayers = (scenario: MockScenario, configOverrides?: Partial<AppConfigType>) =>
+export const MockLayers = (
+  scenario: MockScenario,
+  configOverrides?: Partial<AppConfigType>,
+) =>
   Layer.mergeAll(MockClientLayer(scenario), MockConfigLayer(configOverrides));

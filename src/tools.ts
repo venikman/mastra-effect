@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import fg from "fast-glob";
-import { Cause, Context, Data, Effect, Layer, Option } from "effect";
+import { Context, Data, Effect, Layer } from "effect";
+import { runOrThrow } from "./effect-utils.js";
 
 export type JsonSchema = {
   type: "object";
@@ -75,16 +76,6 @@ const DEFAULT_MAX_MATCHES = 50;
 
 const sha256 = (input: string): string =>
   createHash("sha256").update(input).digest("hex").slice(0, 16);
-
-const runOrThrow = async <A, E>(eff: Effect.Effect<A, E>): Promise<A> => {
-  const exit = await Effect.runPromiseExit(eff);
-  if (exit._tag === "Failure") {
-    const err = Cause.failureOption(exit.cause);
-    if (Option.isSome(err)) throw err.value;
-    throw exit.cause;
-  }
-  return exit.value;
-};
 
 const isDeniedRelPath = (rel: string): { denied: boolean; reason?: string } => {
   const normalized = rel.split(Path.sep).join("/");
